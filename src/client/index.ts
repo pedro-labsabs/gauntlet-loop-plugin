@@ -7,6 +7,7 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { GauntletRow } from './GauntletRow.tsx'
+import type {} from '../projection-types.ts'
 import { en, NS, zh, type GauntletKey } from './locale.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

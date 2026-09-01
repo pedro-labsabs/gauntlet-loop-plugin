@@ -1,28 +1,31 @@
 /**
  * Gauntlet workbench toolview: a dedicated card for each `gauntlet_loop`
- * call in the transcript.  The card shows the accumulated workbench state
- * as of that call — projected deterministically from the durable wire
- * material (the conversation snapshot's settled tool results), so a
- * reconstructed session renders semantically identical cards.
+ * call in the transcript.
+ *
+ * The accumulated workbench state arrives as a finished whole value from the
+ * Host session-projection unit, read via `useProjection('gauntlet')` — NOT
+ * by folding a partial client window (`chat.legacy.nodes`).  The host fold
+ * covers the full durable log regardless of transcript paging, and the value
+ * is seeded with the history-tail baseline and updated by
+ * `session/projection` push frames.  A reconstructed session renders
+ * semantically identical cards to one observed live.
  *
  * The card is a READ-ONLY projection.  It never runs protocol rules or
- * decides transition validity; it only presents facts the host already
- * accepted (`meta.ok` + the bounded `meta.presentation` envelope) combined
- * with the persisted `argsRaw`.
+ * decides transition validity; it only presents the host-computed DTO.
  */
 
-import { memo, useMemo, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { memo, useState, type KeyboardEvent, type ReactNode } from 'react'
 import {
   IconChevronDownOutline14, IconChevronRightOutline14, IconInspectOutline12, IconSparkle16, StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
-  ConversationNode, RunningToolCall, ToolCallBlock, ToolResultNode,
+  RunningToolCall, ToolCallBlock, ToolResultNode,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import {
-  projectGauntlet, parseGauntletArgs,
-  type BlockedView, type GauntletCallSlice, type ProjectedRound, type ProjectedUnit,
+  parseProjectionWire, isOpenablePath, resultText, actionOf, boundedText, unitGlyphStatus,
+  type GauntletProjectionDTO, type BlockedDTO, type ProjectedRoundDTO, type ProjectedUnitDTO,
 } from './model.ts'
 import { type GauntletKey } from './locale.ts'
 import css from './GauntletRow.module.css'
@@ -37,66 +40,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 // ---- Full row props: toolview runtime share + this package's locale seat. ----
 type GauntletRowProps = ToolCallViewProps & PropsLocale<'gauntlet'>
 
-// ---- Fallback helpers ----
 
-function firstLine(text: string): string {
-  const nl = text.indexOf('\n')
-  return nl === -1 ? text : text.slice(0, nl)
-}
-
-/** Flatten durable result blocks under the generic Tool-row text contract. */
-function resultText(block: ToolCallBlock): string | null {
-  if (!('kind' in block)) return null
-  const parts: string[] = []
-  for (const item of block.content) {
-    parts.push(item.type === 'text' ? item.text : JSON.stringify(item, null, 2))
-  }
-  if (parts.length === 0 && block.error !== undefined) {
-    parts.push(`${block.error.name}: ${block.error.code}`)
-  }
-  return parts.join('\n') || null
-}
-
-/** Parse the action name from wire args (empty when unavailable). */
-function actionOf(argsRaw: string | null): string {
-  const args = parseGauntletArgs(argsRaw)
-  if (args === null) return ''
-  const action = args['action']
-  return typeof action === 'string' ? action : ''
-}
-
-/**
- * Collect every SETTLED gauntlet_loop call slice in the conversation,
- * walking nested sub-calls.  Running (in-flight) gauntlet calls are not
- * settled, so they are excluded — the current running state rides the
- * block prop instead.
- */
-function collectGauntletSlices(nodes: readonly ConversationNode[]): GauntletCallSlice[] {
-  const slices: GauntletCallSlice[] = []
-  const walk = (blocks: readonly ToolCallBlock[]): void => {
-    for (const block of blocks) {
-      if ('kind' in block) {
-        if (block.call?.name === 'gauntlet_loop') {
-          slices.push({
-            seq: block.seq,
-            argsRaw: block.call.argsRaw,
-            meta: block.meta,
-            isError: block.isError,
-            error: block.error,
-          })
-        }
-        walk(block.subCalls)
-      } else {
-        walk(block.subCalls)
-      }
-    }
-  }
-  for (const node of nodes) {
-    if (node.kind === 'tool-result') walk([node as ToolResultNode])
-  }
-  slices.sort((left, right) => left.seq - right.seq)
-  return slices
-}
 
 // ---- Display helpers ----
 
@@ -119,12 +63,7 @@ function unitStatusLabel(status: string, t: GauntletRowProps['t']): string {
 }
 
 function unitGlyph(status: string): ReactNode {
-  switch (status) {
-    case 'won': return <StateDot state="done" size={10} />
-    case 'awaiting_critique': return <StateDot state="ongoing" size={10} />
-    case 'rebuild': return <StateDot state="warning" size={10} />
-    default: return <StateDot state="done" size={10} className={css.unitPending} />
-  }
+  return <StateDot state={unitGlyphStatus(status)} size={10} className={status === 'pending' ? css.unitPending : undefined} />
 }
 
 function winnerBadge(winner: 'ours' | 'bar', t: GauntletRowProps['t']): ReactNode {
@@ -133,16 +72,11 @@ function winnerBadge(winner: 'ours' | 'bar', t: GauntletRowProps['t']): ReactNod
   return <span className={`${css.winnerBadge} ${cls}`}>{label}</span>
 }
 
-/** Only filesystem-like paths are openable through the Host; URLs/ids never are. */
-function isOpenablePath(location: string): boolean {
-  return !/^[a-z][a-z0-9+.-]*:\/\//i.test(location)
-}
-
 // ---- Blocked panel ----
 
 const BlockedPanel = memo(function BlockedPanel({
   blocked, t,
-}: { blocked: BlockedView; t: GauntletRowProps['t'] }) {
+}: { blocked: BlockedDTO; t: GauntletRowProps['t'] }) {
   return (
     <div className={css.blockedPanel} role="alert">
       <div className={css.blockedHeader}>{t('row.blockedHeading')}</div>
@@ -165,7 +99,7 @@ const BlockedPanel = memo(function BlockedPanel({
 
 const RoundDetail = memo(function RoundDetail({
   round, openFile, t,
-}: { round: ProjectedRound; openFile: (path: string) => void; t: GauntletRowProps['t'] }) {
+}: { round: ProjectedRoundDTO; openFile: (path: string) => void; t: GauntletRowProps['t'] }) {
   const openable = isOpenablePath(round.artifactLocation)
   const openArtifact = (): void => { if (openable) openFile(round.artifactLocation) }
   return (
@@ -235,7 +169,7 @@ const RoundDetail = memo(function RoundDetail({
 const UnitItem = memo(function UnitItem({
   unit, expanded, onToggle, openFile, t,
 }: {
-  unit: ProjectedUnit
+  unit: ProjectedUnitDTO
   expanded: boolean
   onToggle: () => void
   openFile: (path: string) => void
@@ -294,7 +228,7 @@ const GenericFallback = memo(function GenericFallback({
 }) {
   const settled = 'kind' in block
   const argsRaw = settled ? (block as ToolResultNode).call?.argsRaw ?? '' : (block as RunningToolCall).argsRaw
-  const output = resultText(block)
+  const output = 'kind' in block ? resultText(block.content, block.error) : null
   const state = !settled ? 'running' : block.error?.code === 'interrupted' ? 'stopped' : 'error'
   return (
     <div className={css.card} data-tool="gauntlet_loop" data-state={state}>
@@ -303,8 +237,8 @@ const GenericFallback = memo(function GenericFallback({
         {reason !== undefined && reason !== '' ? (
           <span className={css.fallbackReason}>{reason}</span>
         ) : null}
-        {argsRaw !== '' ? <pre className={css.fallbackCode}>{firstLine(argsRaw)}</pre> : null}
-        {output !== null ? <pre className={css.fallbackCode}>{firstLine(output)}</pre> : null}
+        {argsRaw !== '' ? <pre className={css.fallbackCode}>{boundedText(argsRaw)}</pre> : null}
+        {output !== null ? <pre className={css.fallbackCode}>{boundedText(output)}</pre> : null}
       </div>
       {inspect !== undefined ? (
         <button type="button" className={css.inspectButton} onClick={inspect}>
@@ -319,35 +253,27 @@ const GenericFallback = memo(function GenericFallback({
 // ---- Main card ----
 
 /**
- * Render one `gauntlet_loop` call as the accumulated workbench as of that
- * call.
+ * Render one `gauntlet_loop` call as the accumulated workbench, sourced from
+ * the Host session projection (`useProjection('gauntlet')`).
  * @param props - keyed toolview payload plus the gauntlet locale seat.
  * @returns the dedicated workbench card.
  */
-export function GauntletRow({ block, useSession, openFile, inspect, t }: GauntletRowProps) {
+export function GauntletRow({ block, useProjection, openFile, inspect, t }: GauntletRowProps) {
   const [expanded, setExpanded] = useState(false)
   const [openUnits, setOpenUnits] = useState<ReadonlySet<string>>(new Set())
 
-  // The projection is derived from the durable conversation snapshot
-  // (replay-stable).  We select the settled node list and fold only the
-  // gauntlet_loop slices up to and including this call.
-  const nodes = useSession(snapshot => snapshot.chat.legacy.nodes)
-  const projection = useMemo(() => {
-    const slices = collectGauntletSlices(nodes)
-    const blockSeq = 'kind' in block ? block.seq : null
-    const window = blockSeq === null
-      ? slices
-      : slices.filter(slice => slice.seq <= blockSeq)
-    const running = !('kind' in block)
-    return projectGauntlet(window, running)
-  }, [nodes, block])
+  // Finished whole value from the Host projection unit; undefined = the
+  // capability is absent (unit not registered / baseline not yet seeded) or
+  // the value is malformed — all handled as a safe fallback.
+  const workbench = useProjection('gauntlet')
+  const projection = parseProjectionWire(workbench)
 
   // ---- Fallback: unavailable projection renders generic/textual ----
-  if (!projection.available) {
+  if (projection === null || !projection.available) {
     return (
       <GenericFallback
         block={block}
-        reason={projection.unavailableReason}
+        reason={projection?.unavailableReason}
         t={t}
         inspect={inspect}
       />
