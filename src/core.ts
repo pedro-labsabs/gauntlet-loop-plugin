@@ -1,5 +1,23 @@
+import { createHash } from 'node:crypto'
+
 export type GauntletPhase = 'idle' | 'refine' | 'split' | 'loop' | 'report' | 'done' | 'halted'
 export type PieceStatus = 'pending' | 'awaiting_critique' | 'rebuild' | 'won'
+
+/**
+ * Version of the protocol FOLD semantics — the rules in `runGauntletAction`
+ * that turn one settled call into the next state.  Bump this constant whenever
+ * those rules change in a way that could produce a different state for the
+ * same inputs: a persisted log written under an older version must then fail
+ * closed at reconstruction instead of being silently replayed under new rules.
+ */
+export const GAUNTLET_PROTOCOL_VERSION = 1
+
+/**
+ * Version of the `GauntletState` SHAPE (schemaVersion field).  Bump when the
+ * serialized state fields change.  Distinct from the fold-semantics version:
+ * a state-shape change also requires a protocol-semantics review.
+ */
+export const GAUNTLET_SCHEMA_VERSION = 2
 
 export interface QualityBar {
   name: string
@@ -37,7 +55,8 @@ export interface PieceState {
 }
 
 export interface GauntletState {
-  schemaVersion: 2
+  schemaVersion: typeof GAUNTLET_SCHEMA_VERSION
+  protocolVersion: typeof GAUNTLET_PROTOCOL_VERSION
   runId: string | null
   phase: GauntletPhase
   rawCommand: string | null
@@ -128,7 +147,8 @@ export function findSubjectiveTerms(input: string): string[] {
 
 export function createInitialState(): GauntletState {
   return {
-    schemaVersion: 2,
+    schemaVersion: GAUNTLET_SCHEMA_VERSION,
+    protocolVersion: GAUNTLET_PROTOCOL_VERSION,
     runId: null,
     phase: 'idle',
     rawCommand: null,
@@ -147,6 +167,64 @@ export function createInitialState(): GauntletState {
 
 function resetInto(state: GauntletState): void {
   Object.assign(state, createInitialState())
+}
+
+/**
+ * Deterministic semantic fingerprint of a GauntletState, used to verify that a
+ * replayed settled call reproduces the exact result that was originally
+ * persisted.  Excludes volatile timestamps (`startedAt`, `finishedAt`,
+ * `refineRejections[].at`) and the envelope versions (checked separately via
+ * the persisted meta), so live execution and replay agree byte-for-byte even
+ * when the harness stamps slightly different wall-clock times.  Every field
+ * that shapes the protocol's next transition is included, so any tampering
+ * that changes a call's semantics produces a different fingerprint.
+ *
+ * Returns a FIXED-SIZE SHA-256 hex digest of a canonical (deterministically
+ * key-sorted) JSON representation — never the whole state JSON.  This keeps
+ * the persisted `tool/result.meta` constant-sized regardless of how large the
+ * accumulated state grows (no O(n²) write amplification).
+ */
+export function stateFingerprint(state: GauntletState): string {
+  const payload = {
+    phase: state.phase,
+    runId: state.runId,
+    rawCommand: state.rawCommand,
+    refinedCommand: state.refinedCommand,
+    bar: state.bar,
+    subjectivity: state.subjectivity,
+    refineRejections: state.refineRejections.map(rejection => ({
+      refined: rejection.refined,
+      bar: rejection.bar,
+      reasons: rejection.reasons,
+      flagged: rejection.flagged,
+    })),
+    pieces: state.pieces,
+    piecesState: state.piecesState,
+    summary: state.summary,
+    haltedReason: state.haltedReason,
+  }
+  return createHash('sha256').update(canonicalJson(payload)).digest('hex')
+}
+
+/**
+ * Deterministic JSON encoding with recursively sorted object keys, so the
+ * digest input is independent of key insertion order (a canonical form).
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value) ?? 'null'
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`
+  }
+  const record = value as Record<string, unknown>
+  const parts: string[] = []
+  for (const key of Object.keys(record).sort()) {
+    const child = record[key]
+    if (child === undefined) continue
+    parts.push(`${JSON.stringify(key)}:${canonicalJson(child)}`)
+  }
+  return `{${parts.join(',')}}`
 }
 
 function allAgentIds(state: GauntletState): Set<string> {

@@ -100,15 +100,18 @@ The state machine can prove that the **registered protocol trace** is internally
 
 It cannot independently prove that a supplied sub-agent id corresponds to a genuinely fresh DSH process/context, nor inspect arbitrary artifacts by itself. The lead/harness still owns the actual delegation and artifact access. The stricter contract makes skipped steps visible and rejectable instead of silently accepting them.
 
-State is currently process-local. Restarting the DSH process loses an active Gauntlet run. Durable session projection/checkpointing is the next architectural step rather than being faked with an ad-hoc file.
+State is durable: the canonical run is reconstructed from the session event log (every settled `gauntlet_loop` call is a `tool/call` + `tool/result` pair that DSH persists across restarts). Restarting/reloading the DSH process replays the log through the pure core and resumes exactly where the run stopped. No ad-hoc file, second store, or independent state manager is introduced.
+
+**Fail-closed reconstruction:** every settled call persists a verification `meta` on its `tool/result` (protocol/schema version + semantic fingerprint of the post-action state). Replay recomputes the fingerprint from the reproduced state and **fails closed** on any divergence: a tampered call, an incompatible protocol version, a forged verdict, or a stale log without verification metadata can never silently normalize into a valid Gauntlet.
 
 ## Architecture
 
-- `src/core.ts` — pure protocol/state machine; no DSH dependency.
+- `src/core.ts` — pure protocol/state machine; no DSH dependency. Sole authority on rules and transitions.
+- `src/replay.ts` — pure reconstruction: folds settled `gauntlet_loop` calls from the session event log through the core, plus fail-closed cross-field validation.
 - `src/presentation.ts` — deterministic dashboard renderer.
 - `src/index.ts` — thin DSH tool adapter + Host presentation card.
-- `src/invariant.ts` — package invariant companion; durable replay checks are intentionally deferred until state becomes durable.
-- `test/` — protocol and visual renderer regression tests.
+- `src/invariant.ts` — package invariant companion; live replay/cross-event checks over the session log.
+- `test/` — protocol, visual renderer, restart/reconstruction, corruption, and real-session integration regression tests.
 
 ## Credits
 
