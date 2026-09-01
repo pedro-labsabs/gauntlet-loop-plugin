@@ -15,30 +15,28 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createRequire } from 'node:module'
 
-// Resolve the REAL session package from the harness checkout. The harness
-// lives beside this plugin repo; tests resolve it at runtime.
+// Resolve the REAL session package. Prefer the harness checkout's current
+// build (the version the plugin's peerDeps target), then fall back to a
+// resolvable package; skip when neither is available (e.g. bare CI).
 const require = createRequire(import.meta.url)
 let SessionId, Session
-try {
-  ;({ SessionId, Session } = require('@deepseek-ai/dsh-session'))
-} catch {
-  // Fallback: resolve via an absolute path when the package is not hoisted.
-  const candidates = [
-    '/home/pedro/dsh-ecosystem/deepseek-harness/packages/core/session/lib/index.js',
-  ]
-  let loaded = false
-  for (const candidate of candidates) {
-    try {
-      ;({ SessionId, Session } = require(candidate))
-      loaded = true
-      break
-    } catch {
-      /* try next */
-    }
+const candidates = [
+  // Harness checkout (the peerDeps target version), when present beside the
+  // plugin repo.
+  '/home/pedro/dsh-ecosystem/deepseek-harness/packages/core/session/lib/index.js',
+  // The peer dependency as installed by npm (^0.1.1-rc.2 in CI).
+  '@deepseek-ai/dsh-session',
+]
+for (const candidate of candidates) {
+  try {
+    ;({ SessionId, Session } = require(candidate))
+    break
+  } catch {
+    /* try next */
   }
-  if (!loaded) {
-    console.log('SKIP: real @deepseek-ai/dsh-session not resolvable from this environment')
-  }
+}
+if (typeof Session === 'undefined') {
+  console.log('SKIP: real @deepseek-ai/dsh-session not resolvable from this environment')
 }
 
 import { createInitialState, runGauntletAction } from '../lib/core.js'
