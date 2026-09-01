@@ -4,9 +4,13 @@
  *
  * The session log is the single durable source of truth.  A `gauntlet_loop`
  * call is recorded as a `tool/call` event (raw arguments JSON) followed by a
- * `tool/result` event (carrying the callId in its message source).  These are
- * native DSH events that persist across restarts.  Reconstruction replays the
- * SETTLED calls through `runGauntletAction` to reproduce the canonical state.
+ * `tool/result` event (carrying the callId in its message source AND a
+ * verification meta: protocol/schema versions + a semantic fingerprint of the
+ * post-action state).  These are native DSH events that persist across
+ * restarts.  Reconstruction replays the SETTLED calls through
+ * `runGauntletAction` to reproduce the canonical state, and FAILS CLOSED when
+ * a settled call does not reproduce its persisted result (tampering,
+ * incompatible protocol version, or stale logs without verification meta).
  *
  * "Restart" is simulated by building the event log, discarding the in-memory
  * state, and reconstructing from the events alone.
@@ -14,7 +18,13 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createInitialState, runGauntletAction } from '../lib/core.js'
+import {
+  createInitialState,
+  GAUNTLET_PROTOCOL_VERSION,
+  GAUNTLET_SCHEMA_VERSION,
+  runGauntletAction,
+  stateFingerprint,
+} from '../lib/core.js'
 import {
   findCallTime,
   reconstructFromSessionEvents,
@@ -35,12 +45,23 @@ const PIECES = [
 
 // ---- helpers ----
 
+/** Build the verification meta the tool persists on every settled result. */
+function resultMeta(result) {
+  return {
+    protocol: GAUNTLET_PROTOCOL_VERSION,
+    schema: GAUNTLET_SCHEMA_VERSION,
+    ok: result.ok === true,
+    fingerprint: result.state ? stateFingerprint(result.state) : null,
+  }
+}
+
 /**
- * Simulate the agent loop recording a gauntlet_loop call: append a
- * `tool/call` event (with raw arguments) and then a `tool/result` event whose
- * message source carries the same callId.  Returns the grown log.
+ * Simulate the agent loop recording a gauntlet_loop call: run the action on
+ * the live state, then append a `tool/call` event (raw arguments) and a
+ * `tool/result` event (callId in its message source + verification meta).
  */
-function recordCall(log, callId, args, time) {
+function actAndRecord(log, state, callId, args, time) {
+  const result = runGauntletAction(state, args, { now: time, runId: callId })
   log.push({
     type: 'tool/call',
     seq: log.length,
@@ -60,17 +81,12 @@ function recordCall(log, callId, args, time) {
         source: { kind: 'tool', callId },
         content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: 'ok' }], isError: false }],
       },
+      meta: resultMeta(result),
     },
     sourceEventSeqs: [log.length - 2],
     surfaceOp: 'append',
   })
-  return log
-}
-
-/** Apply a live action to a state, recording the call in the log as DSH would. */
-function actAndRecord(log, state, callId, args, time) {
-  recordCall(log, callId, args, time)
-  runGauntletAction(state, args, { now: time, runId: callId })
+  return result
 }
 
 /** Drive a full run to completion, recording every call in the log. */
@@ -261,7 +277,29 @@ test('corruption: a piece marked won without a verdict is rejected', () => {
   assert.ok(errors.some(e => /won/.test(e) && /verdict/.test(e)), `expected won-without-verdict error, got: ${errors.join('; ')}`)
 })
 
-test('corruption: a forged "ours" verdict without evidence is rejected by the core on replay', () => {
+test('corruption: tampering a settled call\'s arguments fails closed (no silent idle)', () => {
+  const log = []
+  const state = createInitialState()
+  let t = 1000
+  actAndRecord(log, state, 'call-1', { action: 'submit', command: 'Build checkout.' }, t++)
+
+  // Tamper the persisted arguments: drop the command.  The verification meta
+  // (fingerprint of the original post-action state) is unchanged.
+  const tampered = structuredClone(log)
+  const callEvent = tampered.find((e) => e.type === 'tool/call' && e.data?.callId === 'call-1')
+  assert.ok(callEvent)
+  callEvent.data.arguments = JSON.stringify({ action: 'submit' })
+
+  // The core would reject the empty-command submit and stay idle — but the
+  // persisted result says it was accepted.  Reconstruction must FAIL CLOSED,
+  // not silently normalize the corrupted history into a valid idle Gauntlet.
+  const { error } = reconstructFromSessionEvents(tampered)
+  assert.ok(error, 'expected a fail-closed reconstruction error')
+  assert.equal(error.kind, 'corrupted')
+  assert.match(error.detail, /fingerprint mismatch|was .* in the persisted log/)
+})
+
+test('corruption: a forged "ours" verdict without evidence fails closed on replay', () => {
   const log = []
   const state = createInitialState()
   let t = 1000
@@ -270,8 +308,9 @@ test('corruption: a forged "ours" verdict without evidence is rejected by the co
   actAndRecord(log, state, 'call-3', { action: 'split', pieces: PIECES }, t++)
   actAndRecord(log, state, 'call-4', { action: 'build', pieceIndex: 0, builderSubagentId: 'b1', artifact: { location: 'src/p1.ts', summary: 'r1' } }, t++)
 
-  // Forge a critique with an empty verdict payload: the core rejects it, so
-  // replay leaves the piece awaiting_critique (no auto-win).
+  // Forge a critique with an empty verdict payload.  The original run never
+  // had this call, so there is no matching verification meta; a forged
+  // settled call without meta is stale and must fail closed.
   const forged = structuredClone(log)
   forged.push({
     type: 'tool/call',
@@ -294,33 +333,15 @@ test('corruption: a forged "ours" verdict without evidence is rejected by the co
         source: { kind: 'tool', callId: 'call-5' },
         content: [{ type: 'tool-result', toolCallId: 'call-5', content: [{ type: 'text', text: 'ok' }], isError: false }],
       },
+      // No meta: a forged/injected call.
     },
     sourceEventSeqs: [forged.length - 2],
     surfaceOp: 'append',
   })
 
-  const { state: rebuilt } = reconstructFromSessionEvents(forged)
-  // The rejected critique does not advance the piece.
-  assert.equal(rebuilt.piecesState[0].status, 'awaiting_critique')
-  assert.equal(rebuilt.piecesState[0].rounds[0].verdict, null)
-})
-
-test('corruption: a tampered submit with no command fails closed to idle', () => {
-  const log = []
-  const state = createInitialState()
-  let t = 1000
-  actAndRecord(log, state, 'call-1', { action: 'submit', command: 'Build checkout.' }, t++)
-
-  const tampered = structuredClone(log)
-  const callEvent = tampered.find((e) => e.type === 'tool/call' && e.data?.callId === 'call-1')
-  assert.ok(callEvent)
-  callEvent.data.arguments = JSON.stringify({ action: 'submit' })
-
-  const { state: rebuilt, error } = reconstructFromSessionEvents(tampered)
-  // The core rejects the empty command at submit, so the run never starts and
-  // stays idle — the corrupted submit cannot produce a valid mid-run Gauntlet.
-  assert.equal(rebuilt.phase, 'idle')
-  assert.equal(error, undefined)
+  const { error } = reconstructFromSessionEvents(forged)
+  assert.ok(error, 'expected a fail-closed reconstruction error')
+  assert.equal(error.kind, 'stale')
 })
 
 // ---- 7. Schema/version: incompatible data is not silently accepted ----
@@ -340,9 +361,48 @@ test('schema/version: unknown ignorable event types are skipped without corrupti
     { type: 'vendor/future-event', seq: 5, time: 99_999, data: { whatever: true }, ignorable: true },
     ...log.slice(5),
   ]
-  const { state: rebuilt } = reconstructFromSessionEvents(withForeign)
+  const { state: rebuilt, error } = reconstructFromSessionEvents(withForeign)
+  assert.equal(error, undefined)
   assert.equal(rebuilt.phase, 'loop')
   assert.equal(rebuilt.piecesState[0].status, 'awaiting_critique')
+})
+
+test('schema/version: a settled call with an incompatible protocol version fails closed', () => {
+  const log = []
+  const state = createInitialState()
+  let t = 1000
+  actAndRecord(log, state, 'call-1', { action: 'submit', command: 'Build checkout.' }, t++)
+  actAndRecord(log, state, 'call-2', { action: 'refine', refinedCommand: 'Build checkout p95 under 100 ms.', bar: BAR }, t++)
+
+  // Rewrite the verification meta of the second call to an older protocol
+  // version (as if written by a previous tool generation).
+  const tampered = structuredClone(log)
+  const resultEvent = tampered.find((e) => e.type === 'tool/result' && e.data?.message?.source?.callId === 'call-2')
+  assert.ok(resultEvent)
+  resultEvent.data.meta.protocol = GAUNTLET_PROTOCOL_VERSION - 1
+
+  const { error } = reconstructFromSessionEvents(tampered)
+  assert.ok(error, 'expected a fail-closed reconstruction error')
+  assert.equal(error.kind, 'incompatible')
+  assert.match(error.detail, /protocol/)
+})
+
+test('schema/version: a settled call without verification meta fails closed (stale log)', () => {
+  const log = []
+  const state = createInitialState()
+  let t = 1000
+  actAndRecord(log, state, 'call-1', { action: 'submit', command: 'Build checkout.' }, t++)
+
+  // Strip the verification meta from the settled result (a pre-verification
+  // log): reconstruction cannot prove compatibility and must fail closed.
+  const tampered = structuredClone(log)
+  const resultEvent = tampered.find((e) => e.type === 'tool/result' && e.data?.message?.source?.callId === 'call-1')
+  assert.ok(resultEvent)
+  delete resultEvent.data.meta
+
+  const { error } = reconstructFromSessionEvents(tampered)
+  assert.ok(error, 'expected a fail-closed reconstruction error')
+  assert.equal(error.kind, 'stale')
 })
 
 // ---- 8. Determinism ----
@@ -357,11 +417,58 @@ test('determinism: reconstruction is stable across repeated runs', () => {
   assert.equal(first.state.phase, 'done')
 })
 
-// ---- 9. findCallTime ----
+// ---- 9. Incremental fold ----
+
+test('incremental: resuming from a checkpoint reproduces the full replay', () => {
+  const log = []
+  runFullGauntlet(log)
+
+  // Fold in chunks, resuming from the previous checkpoint each time.  The
+  // growing slices must converge exactly onto the full log.
+  let checkpoint
+  let finalState
+  const chunk = 3
+  for (let end = chunk; ; end += chunk) {
+    const limit = Math.min(end, log.length)
+    const outcome = reconstructFromSessionEvents(log.slice(0, limit), checkpoint)
+    assert.equal(outcome.error, undefined)
+    checkpoint = outcome.checkpoint
+    finalState = outcome.state
+    if (limit >= log.length) break
+  }
+
+  // Fold the whole log from scratch.
+  const full = reconstructFromSessionEvents(log)
+  assert.equal(full.error, undefined)
+  assert.deepEqual(finalState, full.state)
+  assert.equal(finalState.phase, 'done')
+})
+
+test('incremental: a stale checkpoint (log truncated) falls back to full replay', () => {
+  const log = []
+  runFullGauntlet(log)
+  const full = reconstructFromSessionEvents(log)
+  assert.equal(full.error, undefined)
+
+  // A checkpoint whose lastSeq exceeds a truncated log must be discarded and
+  // the fold restarted from scratch — it must never produce a wrong state.
+  // slice(0,2) = submit call + result → phase 'refine'.
+  const outcome = reconstructFromSessionEvents(log.slice(0, 2), {
+    lastSeq: 1000,
+    state: full.checkpoint.state,
+    pending: {},
+  })
+  assert.equal(outcome.error, undefined)
+  assert.equal(outcome.state.phase, 'refine')
+  assert.equal(outcome.state.rawCommand, 'Build checkout with measurable constraints.')
+})
+
+// ---- 10. findCallTime ----
 
 test('findCallTime returns the logged tool/call time for a callId', () => {
   const log = []
-  recordCall(log, 'call-x', { action: 'submit', command: 'x' }, 42)
+  const state = createInitialState()
+  actAndRecord(log, state, 'call-x', { action: 'submit', command: 'x' }, 42)
   assert.equal(findCallTime(log, 'call-x'), 42)
   assert.equal(findCallTime(log, 'missing'), undefined)
 })

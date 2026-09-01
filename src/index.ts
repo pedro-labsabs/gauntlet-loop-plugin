@@ -6,13 +6,20 @@
  * state machine (`src/core.ts`).  No in-memory mutable state is maintained
  * between calls — the session event log IS the durable source of truth.
  *
- * On restart/reload the session log is replayed from persistence (JSONL/SQLite),
- * and the first tool call after reload reconstructs the exact pre-restart state
- * (timestamps derived from event times, so live execution and replay agree).
+ * Every successful call persists a verification `meta` on its `tool/result`
+ * (protocol version + semantic fingerprint of the post-action state).  On
+ * restart/reload the session log is replayed from persistence (JSONL/SQLite);
+ * the first tool call after reload reconstructs the exact pre-restart state
+ * and FAILS CLOSED if any settled call does not reproduce its persisted result
+ * (tampering, incompatible protocol version, or a stale log without meta).
  *
- * Cross-session isolation is guaranteed: each session has its own event log.
- * The 'anonymous' fallback is removed — a tool call without an owning agent
- * session is rejected.
+ * The live fold is incremental: a per-session watermark checkpoint re-folds
+ * only the delta on each call, while the full deterministic replay remains
+ * available for verification and tests.
+ *
+ * Cross-session isolation is guaranteed: each session has its own event log
+ * and its own fold checkpoint.  The 'anonymous' fallback is removed — a tool
+ * call without an owning agent session is rejected.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -21,14 +28,27 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import {
   createInitialState,
+  GAUNTLET_PROTOCOL_VERSION,
+  GAUNTLET_SCHEMA_VERSION,
   runGauntletAction,
+  stateFingerprint,
   type GauntletActionInput,
+  type GauntletResult,
 } from './core.js'
-import { findCallTime, reconstructFromSessionEvents } from './replay.js'
+import { findCallTime, reconstructFromSessionEvents, type ReplayCheckpoint } from './replay.js'
 import { renderToolValue } from './presentation.js'
 
 export const name = 'tool-gauntlet'
 export const inject = ['tools']
+
+/**
+ * Per-session in-memory fold checkpoints keyed by `SessionId`.  A pure cache
+ * of the last reconstruction position — NEVER a source of truth: the canonical
+ * state is always derivable from (and verified against) the session event log.
+ * @see reconstructFromSessionEvents
+ */
+const replayCheckpoints = new Map<string, ReplayCheckpoint>()
+const MAX_CACHE = 128
 
 function detachedJson(value: unknown): JsonValue {
   return structuredClone(value) as JsonValue
@@ -94,6 +114,20 @@ export function apply(ctx: Context): void {
     output: {
       schema: { type: 'json' },
       render: (_args: unknown, value: JsonValue) => [{ type: 'text', text: renderToolValue(value) }],
+      // Persisted verification meta on every top-level tool/result: the
+      // protocol/schema versions that produced the state plus a semantic
+      // fingerprint of the post-action state.  Replay recomputes the
+      // fingerprint from the reproduced state and fails closed on divergence.
+      presentationMeta: (_args: unknown, value: JsonValue) => {
+        const result = value as Partial<GauntletResult> | null
+        const state = result?.state ?? null
+        return detachedJson({
+          protocol: GAUNTLET_PROTOCOL_VERSION,
+          schema: GAUNTLET_SCHEMA_VERSION,
+          ok: result?.ok === true,
+          fingerprint: state ? stateFingerprint(state) : null,
+        })
+      },
     },
     presentCall: args => ({
       card: 'generic',
@@ -120,16 +154,20 @@ export function apply(ctx: Context): void {
       }
 
       const session = agent.session
+      const sessionId = String(session.id ?? agent.id)
       const events = session.events
       const callId = String(exec.callId ?? '')
 
       // ---- reconstruct the canonical state from the durable session log ----
       // The in-flight tool/call for THIS action is already in the log but has
       // no settled result yet, so reconstruction skips it — the base state is
-      // exactly the state before the current action.
-      const reconstruction = reconstructFromSessionEvents(events)
+      // exactly the state before the current action.  Resume from the cached
+      // checkpoint when it is still within the log (incremental fold).
+      const cached = replayCheckpoints.get(sessionId)
+      const checkpoint = cached !== undefined && cached.lastSeq <= events.length ? cached : undefined
+      const reconstruction = reconstructFromSessionEvents(events, checkpoint)
       if (reconstruction.error) {
-        // Fail closed: never serve a corrupted Gauntlet as valid.
+        // Fail closed: never serve a corrupted/unverifiable Gauntlet as valid.
         return detachedJson({
           ok: false,
           phase: 'idle',
@@ -137,6 +175,13 @@ export function apply(ctx: Context): void {
           next: null,
           state: reconstruction.state,
         })
+      }
+      if (reconstruction.checkpoint) {
+        replayCheckpoints.set(sessionId, reconstruction.checkpoint)
+        if (replayCheckpoints.size > MAX_CACHE) {
+          const firstKey = replayCheckpoints.keys().next().value
+          if (firstKey !== undefined) replayCheckpoints.delete(firstKey)
+        }
       }
 
       // Deterministic `now`: prefer the current tool/call event time so the

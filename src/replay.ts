@@ -11,6 +11,20 @@
  * the same event log, the same state is produced every time (the `now`
  * argument is derived from `event.time`, which is stable).
  *
+ * FAIL-CLOSED VERIFICATION: every settled call carries a `tool/result` whose
+ * `meta` (persisted by the harness via the tool's `presentationMeta`) records
+ * the protocol version and a semantic fingerprint of the post-action state.
+ * Replay recomputes that fingerprint from the reproduced state and fails
+ * closed if it diverges — a tampered call, an incompatible protocol version,
+ * or a stale log without verification metadata can never silently normalize
+ * into a valid Gauntlet.
+ *
+ * INCREMENTAL FOLD: the fold is resumable.  A {@link ReplayCheckpoint} lets a
+ * caller carry the fold forward across growing logs (per-session watermark),
+ * so live calls and invariants re-fold only the delta instead of the whole
+ * history.  The checkpoint is a pure cache — every settled call it resumes
+ * from is still verified against its persisted meta.
+ *
  * A `tool/call` without a matching settled `tool/result` is treated as
  * in-flight (the agent loop appends the result only after the tool returns),
  * so reconstruction never double-applies the action being executed right now.
@@ -20,7 +34,10 @@
 
 import {
   createInitialState,
+  GAUNTLET_PROTOCOL_VERSION,
+  GAUNTLET_SCHEMA_VERSION,
   runGauntletAction,
+  stateFingerprint,
   type GauntletActionInput,
   type GauntletState,
 } from './core.js'
@@ -32,6 +49,51 @@ const TOOL_NAME = 'gauntlet_loop'
 
 /** Error code set by the agent loop when a tool call was aborted before dispatch. */
 const ABORTED_BEFORE_DISPATCH = 'ABORTED_BEFORE_DISPATCH'
+
+// ---- types ----
+
+/**
+ * The verification meta the gauntlet tool persists on every settled
+ * `tool/result` (via its `output.presentationMeta`).  The harness stores it in
+ * `tool/result.data.meta` and replay compares against it.
+ */
+export interface GauntletResultMeta {
+  /** The fold-semantics version that produced this result. */
+  protocol: number
+  /** The state-shape version that produced this result. */
+  schema: number
+  /** Whether the original call was accepted by the core. */
+  ok: boolean
+  /** Semantic fingerprint of the post-action state (`stateFingerprint`). */
+  fingerprint: string | null
+}
+
+/** One pending in-flight gauntlet call (tool/call seen, tool/result not yet). */
+export interface PendingCall {
+  args: GauntletActionInput
+  time: number
+}
+
+/**
+ * A resumable fold position: the seq up to which `state` is current, plus the
+ * in-flight calls that were seen as `tool/call` but not yet settled.  A pure
+ * cache — never a source of truth, always re-verifiable from the log.
+ */
+export interface ReplayCheckpoint {
+  lastSeq: number
+  state: GauntletState
+  pending: Record<string, PendingCall>
+}
+
+/** Result of one reconstruction pass. */
+export interface ReplayOutcome {
+  /** The reconstructed state (fails closed via `error`). */
+  state: GauntletState
+  /** Set when reconstruction cannot be proven safe. */
+  error?: { kind: string; detail: string }
+  /** The new fold position to cache for an incremental next pass. */
+  checkpoint?: ReplayCheckpoint
+}
 
 // ---- public helpers ----
 
@@ -46,6 +108,18 @@ export function parseCallArguments(raw: unknown): GauntletActionInput {
   }
 }
 
+/** Read the verification meta persisted on a `tool/result` event. */
+function readResultMeta(data: Record<string, unknown>): GauntletResultMeta | null {
+  const meta = data.meta as Record<string, unknown> | undefined
+  if (meta === undefined) return null
+  return {
+    protocol: typeof meta.protocol === 'number' ? meta.protocol : -1,
+    schema: typeof meta.schema === 'number' ? meta.schema : -1,
+    ok: meta.ok === true,
+    fingerprint: typeof meta.fingerprint === 'string' ? meta.fingerprint : null,
+  }
+}
+
 // ---- reconstruction ----
 
 /**
@@ -54,20 +128,38 @@ export function parseCallArguments(raw: unknown): GauntletActionInput {
  * a matching non-aborted `tool/result`.  An in-flight call (call without
  * result) is skipped.
  *
+ * When `checkpoint` is provided and its `lastSeq` is within the log, the fold
+ * resumes from that position (seeding state + in-flight calls) and only folds
+ * the delta.  Every settled call folded — resumed or fresh — is verified
+ * against its persisted result meta; any divergence fails closed.
+ *
  * @param events - the session's append-only event list (in seq order).
- * @returns the reconstructed state, plus a fail-closed error when the
- *   reconstructed state fails validation.
+ * @param checkpoint - optional prior fold position to resume from.
+ * @returns the reconstructed state (plus `error` when unverifiable) and the
+ *   next checkpoint.
  */
 export function reconstructFromSessionEvents(
   events: readonly { type: string; time: number; data?: unknown }[],
-): { state: GauntletState; error?: { kind: string; detail: string } } {
-  const state = createInitialState()
+  checkpoint?: ReplayCheckpoint,
+): ReplayOutcome {
+  const start = checkpoint !== undefined && checkpoint.lastSeq <= events.length
+    ? checkpoint.lastSeq
+    : 0
+  const state = start > 0 ? structuredClone(checkpoint!.state) : createInitialState()
 
-  // Pending gauntlet calls seen as tool/call but not yet settled: callId → { args, time }.
-  const pending = new Map<string, { args: GauntletActionInput; time: number }>()
+  // Pending in-flight calls: seeded from the checkpoint, then advanced by the
+  // delta fold.
+  const pending = new Map<string, PendingCall>()
+  if (start > 0) {
+    for (const [callId, call] of Object.entries(checkpoint!.pending)) {
+      pending.set(callId, call)
+    }
+  }
 
-  for (const event of events) {
+  for (let index = start; index < events.length; index += 1) {
+    const event = events[index]!
     const data = (event.data ?? {}) as Record<string, unknown>
+
     if (event.type === 'tool/call' && data.name === TOOL_NAME) {
       const callId = String(data.callId ?? '')
       if (!callId) continue
@@ -80,8 +172,8 @@ export function reconstructFromSessionEvents(
       const source = msg?.source as Record<string, unknown> | undefined
       const callId = typeof source?.callId === 'string' ? source.callId : undefined
       if (!callId) continue
-      const pendingEntry = pending.get(callId)
-      if (!pendingEntry) continue
+      const pendingCall = pending.get(callId)
+      if (!pendingCall) continue
       pending.delete(callId)
 
       // Skip calls that never ran: aborted before dispatch, or the tool
@@ -92,8 +184,57 @@ export function reconstructFromSessionEvents(
       const firstBlock = (msg?.content as unknown[] | undefined)?.[0] as Record<string, unknown> | undefined
       if (firstBlock?.type === 'tool-result' && firstBlock.isError === true) continue
 
+      // ---- fail-closed verification against the persisted result meta ----
+      const meta = readResultMeta(data)
+      if (meta === null) {
+        return {
+          state,
+          error: {
+            kind: 'stale',
+            detail: `settled gauntlet call "${callId}" has no verification meta; the log predates protocol verification or was written by an incompatible tool — refusing to reconstruct`,
+          },
+        }
+      }
+      if (meta.protocol !== GAUNTLET_PROTOCOL_VERSION || meta.schema !== GAUNTLET_SCHEMA_VERSION) {
+        return {
+          state,
+          error: {
+            kind: 'incompatible',
+            detail: `settled gauntlet call "${callId}" carries protocol ${String(meta.protocol)}/schema ${String(meta.schema)}, current is ${String(GAUNTLET_PROTOCOL_VERSION)}/${String(GAUNTLET_SCHEMA_VERSION)} — refusing to replay old rules over new state`,
+          },
+        }
+      }
+      if (typeof meta.fingerprint !== 'string' || meta.fingerprint.length === 0) {
+        return {
+          state,
+          error: {
+            kind: 'corrupted',
+            detail: `settled gauntlet call "${callId}" has no fingerprint in its verification meta`,
+          },
+        }
+      }
+
       // Replay the settled action through the core state machine.
-      runGauntletAction(state, pendingEntry.args, { now: pendingEntry.time, runId: callId })
+      const replayed = runGauntletAction(state, pendingCall.args, { now: pendingCall.time, runId: callId })
+      if (replayed.ok !== meta.ok) {
+        return {
+          state,
+          error: {
+            kind: 'corrupted',
+            detail: `settled gauntlet call "${callId}" was ${meta.ok ? 'accepted' : 'rejected'} in the persisted log but replays as ${replayed.ok ? 'accepted' : 'rejected'}; the call's semantics were changed`,
+          },
+        }
+      }
+      const reproduced = stateFingerprint(state)
+      if (reproduced !== meta.fingerprint) {
+        return {
+          state,
+          error: {
+            kind: 'corrupted',
+            detail: `settled gauntlet call "${callId}" does not reproduce the persisted result (fingerprint mismatch); the history was tampered or the protocol rules changed`,
+          },
+        }
+      }
     }
   }
 
@@ -106,7 +247,13 @@ export function reconstructFromSessionEvents(
     }
   }
 
-  return { state }
+  const pendingRecord: Record<string, PendingCall> = {}
+  for (const [callId, call] of pending) pendingRecord[callId] = call
+
+  return {
+    state,
+    checkpoint: { lastSeq: events.length, state: structuredClone(state), pending: pendingRecord },
+  }
 }
 
 /**
@@ -135,6 +282,14 @@ export function findCallTime(
 export function validateReconstructedState(state: GauntletState): string[] {
   const errors: string[] = []
 
+  // Version envelope: a reconstructed state must carry current versions.
+  if (state.schemaVersion !== GAUNTLET_SCHEMA_VERSION) {
+    errors.push(`State schemaVersion ${String(state.schemaVersion)} does not match current ${String(GAUNTLET_SCHEMA_VERSION)}`)
+  }
+  if (state.protocolVersion !== GAUNTLET_PROTOCOL_VERSION) {
+    errors.push(`State protocolVersion ${String(state.protocolVersion)} does not match current ${String(GAUNTLET_PROTOCOL_VERSION)}`)
+  }
+
   // Phase must be valid.
   const validPhases = ['idle', 'refine', 'split', 'loop', 'report', 'done', 'halted']
   if (!validPhases.includes(state.phase)) {
@@ -143,11 +298,14 @@ export function validateReconstructedState(state: GauntletState): string[] {
   }
 
   // Phase coherence: fields present when required.
+  // NOTE: phase 'refine' means "submit done, refine pending" — refinedCommand,
+  // bar and subjectivity are legitimately absent until refine SETTLES.  They
+  // are required only from 'split' onward.
   if (state.phase !== 'idle') {
     if (!state.rawCommand) errors.push('Non-idle phase without rawCommand')
     if (!state.startedAt) errors.push('Non-idle phase without startedAt')
   }
-  if (state.phase === 'refine' || state.phase === 'split' || state.phase === 'loop'
+  if (state.phase === 'split' || state.phase === 'loop'
     || state.phase === 'report' || state.phase === 'done') {
     if (!state.refinedCommand) errors.push('Phase requires refinedCommand but is missing')
     if (!state.bar) errors.push('Phase requires bar but is missing')

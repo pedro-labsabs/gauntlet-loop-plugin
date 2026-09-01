@@ -1,7 +1,7 @@
 /** Package-owned invariant companion for gauntlet-loop-plugin. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
-import { reconstructFromSessionEvents, validateReconstructedState } from './replay.js'
+import { reconstructFromSessionEvents, validateReconstructedState, type ReplayCheckpoint } from './replay.js'
 
 const PACKAGE_NAME = 'gauntlet-loop-plugin'
 
@@ -12,32 +12,52 @@ export const inject = ['invariants']
  * Replay/cross-event invariant for the gauntlet loop.
  *
  * The installer subscribes to `session/event` globally (across all sessions)
- * and folds the gauntlet tool calls in the session log.  On each event, it
- * checks that the reconstructed state is valid, detecting cross-event
- * inconsistencies such as:
+ * and folds the gauntlet tool calls in the session log.  On each event it
+ * re-verifies the reconstructed state, detecting cross-event inconsistencies
+ * such as:
  *
  * - Piece marked `won` without a valid verdict.
  * - Critique without a preceding build.
  * - Reused builder/critic agent ids.
  * - Phase transitions that violate the core state machine.
- * - Schema/version incompatibility.
+ * - Schema/protocol incompatibility.
+ * - A settled call that does not reproduce its persisted result (tampering).
  *
- * This invariant runs both during live execution (event-driven) and on
- * session replay (the installer seeds itself by folding the full log).
+ * Folding is incremental: a per-session watermark checkpoint re-folds only the
+ * delta, so the invariant cost stays proportional to gauntlet traffic, not to
+ * the whole session log.  The checkpoint is a pure cache — every resumed call
+ * is still verified against its persisted meta.
  */
 const install: InvariantInstaller = (ctx, fail) => {
+  // Per-session fold checkpoints (incremental replay).
+  const checkpoints = new Map<string, ReplayCheckpoint>()
+  const MAX_CHECKPOINTS = 512
+
+  // Sessions that have at least one `gauntlet_loop` call.  Only these pay the
+  // fold cost; ordinary sessions never do.
+  const gauntletSessions = new Set<string>()
+
   /**
    * Fold the gauntlet events for one session and validate the reconstructed
    * state.  Called on every relevant `session/event` and once on seed.
    */
   const foldSession = (session: { id: string | { toString(): string }; events: readonly { type: string; time: number; data?: unknown }[] }): void => {
     const id = String(session.id)
-    let outcome: { error?: { kind: string; detail: string }; state?: import('./core.js').GauntletState }
+    let outcome: { error?: { kind: string; detail: string }; state?: import('./core.js').GauntletState; checkpoint?: ReplayCheckpoint }
     try {
-      outcome = reconstructFromSessionEvents(session.events)
+      const cached = checkpoints.get(id)
+      const checkpoint = cached !== undefined && cached.lastSeq <= session.events.length ? cached : undefined
+      outcome = reconstructFromSessionEvents(session.events, checkpoint)
     } catch (err: unknown) {
       fail(`Gauntlet replay invariant: session "${id}" threw ${String(err)}`)
       return
+    }
+    if (outcome.checkpoint) {
+      checkpoints.set(id, outcome.checkpoint)
+      if (checkpoints.size > MAX_CHECKPOINTS) {
+        const firstKey = checkpoints.keys().next().value
+        if (firstKey !== undefined) checkpoints.delete(firstKey)
+      }
     }
     if (outcome.error) {
       fail(`Gauntlet replay invariant: session "${id}" — ${outcome.error.detail}`)
@@ -48,12 +68,6 @@ const install: InvariantInstaller = (ctx, fail) => {
       fail(`Gauntlet state invariant: session "${id}" — ${errors.join('; ')}`)
     }
   }
-
-  /**
-   * Sessions that have at least one `gauntlet_loop` call.  Only these pay the
-   * fold cost; ordinary sessions never do.
-   */
-  const gauntletSessions = new Set<string>()
 
   /** Whether an event can change the gauntlet reconstruction for a session. */
   const relevant = (sessionId: string, event: { type: string; data?: unknown }): boolean => {

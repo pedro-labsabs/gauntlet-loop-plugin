@@ -102,6 +102,8 @@ It cannot independently prove that a supplied sub-agent id corresponds to a genu
 
 State is durable: the canonical run is reconstructed from the session event log (every settled `gauntlet_loop` call is a `tool/call` + `tool/result` pair that DSH persists across restarts). Restarting/reloading the DSH process replays the log through the pure core and resumes exactly where the run stopped. No ad-hoc file, second store, or independent state manager is introduced.
 
+**Fail-closed reconstruction:** every settled call persists a verification `meta` on its `tool/result` (protocol/schema version + semantic fingerprint of the post-action state). Replay recomputes the fingerprint from the reproduced state and **fails closed** on any divergence: a tampered call, an incompatible protocol version, a forged verdict, or a stale log without verification metadata can never silently normalize into a valid Gauntlet.
+
 ## Architecture
 
 - `src/core.ts` — pure protocol/state machine; no DSH dependency. Sole authority on rules and transitions.

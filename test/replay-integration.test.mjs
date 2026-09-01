@@ -39,7 +39,7 @@ if (typeof Session === 'undefined') {
   console.log('SKIP: real @deepseek-ai/dsh-session not resolvable from this environment')
 }
 
-import { createInitialState, runGauntletAction } from '../lib/core.js'
+import { createInitialState, GAUNTLET_PROTOCOL_VERSION, GAUNTLET_SCHEMA_VERSION, runGauntletAction, stateFingerprint } from '../lib/core.js'
 import { reconstructFromSessionEvents, findCallTime } from '../lib/replay.js'
 
 const BAR = {
@@ -96,6 +96,15 @@ function driveRealSession() {
         role: 'user',
         source: { kind: 'tool', callId },
         content: toolResultBlock(callId),
+      },
+      // Verification meta: protocol/schema versions + semantic fingerprint of
+      // the post-action state.  Replay recomputes the fingerprint from the
+      // reproduced state and fails closed on divergence.
+      meta: {
+        protocol: GAUNTLET_PROTOCOL_VERSION,
+        schema: GAUNTLET_SCHEMA_VERSION,
+        ok: true,
+        fingerprint: stateFingerprint(gauntlet),
       },
     }, { surfaceOp: 'append', sourceEventSeqs: [callSeq] })
     session.append('step/end', { turn, step })
