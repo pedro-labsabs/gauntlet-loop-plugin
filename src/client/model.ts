@@ -12,7 +12,7 @@ import type {
   GauntletProjectionDTO, GauntletStatusDTO, ProjectedUnitDTO, UnitStatusDTO,
   ProjectedRoundDTO, BlockedDTO,
 } from '../projection-types.js'
-import { GAUNTLET_PROJECTION_VERSION } from '../projection-types.js'
+import { GAUNTLET_PROJECTION_VERSION, GAUNTLET_PRESENTATION_VERSION } from '../projection-types.js'
 
 export type { GauntletProjectionDTO, GauntletStatusDTO, ProjectedUnitDTO, UnitStatusDTO, ProjectedRoundDTO, BlockedDTO }
 
@@ -119,7 +119,7 @@ export function parseBlockPresentation(meta: unknown): BlockPresentationView | n
   if (!isRecord(meta)) return null
   const pres = meta.presentation
   if (!isRecord(pres)) return null
-  if (typeof pres.version !== 'number' || pres.version !== GAUNTLET_PROJECTION_VERSION) return null
+  if (typeof pres.version !== 'number' || pres.version !== GAUNTLET_PRESENTATION_VERSION) return null
   if (typeof pres.phase !== 'string' || pres.phase === '') return null
   return {
     phase: pres.phase,

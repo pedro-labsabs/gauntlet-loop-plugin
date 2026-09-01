@@ -10,6 +10,14 @@
 /** Wire version of the projection DTO.  The client fail-closes on mismatch. */
 export const GAUNTLET_PROJECTION_VERSION = 1
 
+/**
+ * Version of the per-call presentation envelope embedded in
+ * `tool/result.meta.presentation` (must match src/core.ts
+ * GAUNTLET_PRESENTATION_VERSION).  Kept in this Node-free module because the
+ * client bundle cannot import core.ts (which imports node:crypto).
+ */
+export const GAUNTLET_PRESENTATION_VERSION = 1
+
 export interface ProjectedRoundDTO {
   round: number
   builder: string

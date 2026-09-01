@@ -203,6 +203,18 @@ function parseCallArguments(raw: unknown): Record<string, unknown> | null {
 }
 
 /** Read the presentation envelope from a settled tool/result meta. */
+/** The only phase values the protocol core can produce. */
+const PROTOCOL_PHASES = new Set(['idle', 'refine', 'split', 'loop', 'report', 'done', 'halted'])
+
+/**
+ * Strictly fail-closed read of the bounded presentation envelope.  Every
+ * field is validated against its real shape: `phase` must be one of the
+ * protocol phases, `next` must be a string or null, `nextPieceIndex` (when
+ * present) a non-negative integer, `error` (when present) a string, and
+ * `rejections` (when present) an array of strings.  Any mismatch returns
+ * `null`, so the fold marks `available: false` and the UI falls back to the
+ * safe generic/textual card instead of letting `viewSchema.parse()` throw.
+ */
 function readPresentation(meta: unknown): {
   version: number
   phase: string
@@ -218,17 +230,21 @@ function readPresentation(meta: unknown): {
   const p = pres as Record<string, unknown>
   const version = typeof p.version === 'number' ? p.version : -1
   if (version !== GAUNTLET_PRESENTATION_VERSION) return null
-  const phase = typeof p.phase === 'string' ? p.phase : ''
-  if (!phase) return null
+  if (typeof p.phase !== 'string' || !PROTOCOL_PHASES.has(p.phase)) return null
+  if (p.next !== null && typeof p.next !== 'string') return null
+  if (p.nextPieceIndex !== undefined
+    && (typeof p.nextPieceIndex !== 'number'
+      || !Number.isInteger(p.nextPieceIndex)
+      || p.nextPieceIndex < 0)) return null
+  if (p.error !== undefined && typeof p.error !== 'string') return null
+  if (p.rejections !== undefined && (!Array.isArray(p.rejections) || !p.rejections.every((r): r is string => typeof r === 'string'))) return null
   return {
     version,
-    phase,
-    next: typeof p.next === 'string' ? p.next : null,
-    nextPieceIndex: typeof p.nextPieceIndex === 'number' ? p.nextPieceIndex : undefined,
-    error: typeof p.error === 'string' ? p.error : undefined,
-    rejections: Array.isArray(p.rejections)
-      ? (p.rejections as unknown[]).filter((r): r is string => typeof r === 'string')
-      : undefined,
+    phase: p.phase,
+    next: p.next ?? null,
+    ...(p.nextPieceIndex !== undefined ? { nextPieceIndex: p.nextPieceIndex as number } : {}),
+    ...(typeof p.error === 'string' ? { error: p.error } : {}),
+    ...(Array.isArray(p.rejections) ? { rejections: p.rejections as string[] } : {}),
   }
 }
 

@@ -287,6 +287,66 @@ test('DF5. rejected call also sets asOfSeq/asOfCallId (the cut advances)', () =>
   assert.equal(dto.status, 'blocked')
 })
 
+
+// ---- Strict readPresentation (malformed metadata) ----
+
+test('SR. invalid phase -> unavailable (fallback), viewSchema does not throw', () => {
+  let state = createInitialProjectionState()
+  state = applyProjectionEvent(state, { type: 'tool/call', seq: 1, time: 1000, data: { turn: 1, step: 1, callId: 'c1', name: 'gauntlet_loop', arguments: '{"action":"submit","command":"Go"}' } })
+  // presentation.phase is "banana" - not a valid protocol phase
+  state = applyProjectionEvent(state, { type: 'tool/result', seq: 2, time: 2000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: false }], source: { kind: 'tool', callId: 'c1' } }, meta: { protocol: 1, schema: 2, ok: true, fingerprint: 'fp', presentation: { version: 1, phase: 'banana', next: 'whatever' } } } })
+  const dto = projectionToDTO(state)
+  assert.equal(dto.available, false, 'invalid phase must fail closed')
+  assert.ok(dto.unavailableReason)
+  // The DTO is available:false -> client falls back; no viewSchema throw here
+  // (the zod dtoSchema would reject a banana phase, which is exactly why we
+  // fail earlier — prove the fold never yields an unparseable DTO).
+})
+
+test('SR2. non-string next -> unavailable', () => {
+  let state = createInitialProjectionState()
+  state = applyProjectionEvent(state, { type: 'tool/call', seq: 1, time: 1000, data: { turn: 1, step: 1, callId: 'c1', name: 'gauntlet_loop', arguments: '{"action":"submit","command":"Go"}' } })
+  state = applyProjectionEvent(state, { type: 'tool/result', seq: 2, time: 2000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: false }], source: { kind: 'tool', callId: 'c1' } }, meta: { protocol: 1, schema: 2, ok: true, fingerprint: 'fp', presentation: { version: 1, phase: 'refine', next: 42 } } } })
+  const dto = projectionToDTO(state)
+  assert.equal(dto.available, false)
+})
+
+test('SR3. bad nextPieceIndex (negative) -> unavailable', () => {
+  let state = createInitialProjectionState()
+  state = applyProjectionEvent(state, { type: 'tool/call', seq: 1, time: 1000, data: { turn: 1, step: 1, callId: 'c1', name: 'gauntlet_loop', arguments: '{"action":"submit","command":"Go"}' } })
+  state = applyProjectionEvent(state, { type: 'tool/result', seq: 2, time: 2000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: false }], source: { kind: 'tool', callId: 'c1' } }, meta: { protocol: 1, schema: 2, ok: true, fingerprint: 'fp', presentation: { version: 1, phase: 'refine', next: 'refine', nextPieceIndex: -1 } } } })
+  const dto = projectionToDTO(state)
+  assert.equal(dto.available, false)
+})
+
+test('SR4. bad rejections shape (not all strings) -> unavailable', () => {
+  let state = createInitialProjectionState()
+  state = applyProjectionEvent(state, { type: 'tool/call', seq: 1, time: 1000, data: { turn: 1, step: 1, callId: 'c1', name: 'gauntlet_loop', arguments: '{"action":"refine","refinedCommand":"X","bar":{"name":"B","fetchHow":"fetch it","compareHow":"blind compare"}}' } })
+  state = applyProjectionEvent(state, { type: 'tool/result', seq: 2, time: 2000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: false }], source: { kind: 'tool', callId: 'c1' } }, meta: { protocol: 1, schema: 2, ok: false, fingerprint: 'fp', presentation: { version: 1, phase: 'refine', next: 'refine', error: 'no', rejections: ['ok', 42] } } } })
+  const dto = projectionToDTO(state)
+  assert.equal(dto.available, false)
+})
+
+test('SR5. non-string error -> unavailable', () => {
+  let state = createInitialProjectionState()
+  state = applyProjectionEvent(state, { type: 'tool/call', seq: 1, time: 1000, data: { turn: 1, step: 1, callId: 'c1', name: 'gauntlet_loop', arguments: '{"action":"refine","refinedCommand":"X","bar":{"name":"B","fetchHow":"fetch it","compareHow":"blind compare"}}' } })
+  state = applyProjectionEvent(state, { type: 'tool/result', seq: 2, time: 2000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: false }], source: { kind: 'tool', callId: 'c1' } }, meta: { protocol: 1, schema: 2, ok: false, fingerprint: 'fp', presentation: { version: 1, phase: 'refine', next: 'refine', error: 7 } } } })
+  const dto = projectionToDTO(state)
+  assert.equal(dto.available, false)
+})
+
+test('SR6. valid presentation with all optional fields still accepted', () => {
+  const events = [
+    callEvent(1, 'c1', 'refine', { refinedCommand: 'Objective.', bar: BAR }),
+    resultEvent(2, 'c1', false, 'refine', 'refine', { presError: 'gate', presRejections: ['subjective: modern'] }),
+  ]
+  const dto = foldAll(events)
+  assert.equal(dto.available, true)
+  assert.equal(dto.status, 'blocked')
+  assert.equal(dto.blocked?.error, 'gate')
+  assert.deepEqual(dto.blocked?.rejections, ['subjective: modern'])
+})
+
 test('11. non-gauntlet tool/result without matching pending returns the same state', () => {
   const state = createInitialProjectionState()
   const otherResult = { type: 'tool/result', seq: 1, time: 1000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'other', content: [], isError: false }], source: { kind: 'tool', callId: 'other' } } } }
