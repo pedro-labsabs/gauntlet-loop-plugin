@@ -1,7 +1,7 @@
 /** Package-owned invariant companion for gauntlet-loop-plugin. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
-import { reconstructFromSessionEvents, validateReconstructedState, type ReplayCheckpoint } from './replay.js'
+import { reconstructFromSessionEvents, validateReconstructedState, ReplayCheckpointCache, type ReplayOutcome } from './replay.js'
 
 const PACKAGE_NAME = 'gauntlet-loop-plugin'
 
@@ -29,13 +29,15 @@ export const inject = ['invariants']
  * is still verified against its persisted meta.
  */
 const install: InvariantInstaller = (ctx, fail) => {
-  // Per-session fold checkpoints (incremental replay).
-  const checkpoints = new Map<string, ReplayCheckpoint>()
-  const MAX_CHECKPOINTS = 512
+  // Per-session fold checkpoints (incremental replay), keyed by the Session
+  // INSTANCE identity so a new incarnation (same id, different object) always
+  // re-verifies the full history — the cache can never become a source of
+  // truth across incarnations.
+  const checkpoints = new ReplayCheckpointCache()
 
-  // Sessions that have at least one `gauntlet_loop` call.  Only these pay the
-  // fold cost; ordinary sessions never do.
-  const gauntletSessions = new Set<string>()
+  // Sessions that have at least one `gauntlet_loop` call (instance-keyed).
+  // Only these pay the fold cost; ordinary sessions never do.
+  const gauntletSessions = new WeakSet<object>()
 
   /**
    * Fold the gauntlet events for one session and validate the reconstructed
@@ -43,9 +45,9 @@ const install: InvariantInstaller = (ctx, fail) => {
    */
   const foldSession = (session: { id: string | { toString(): string }; events: readonly { type: string; time: number; data?: unknown }[] }): void => {
     const id = String(session.id)
-    let outcome: { error?: { kind: string; detail: string }; state?: import('./core.js').GauntletState; checkpoint?: ReplayCheckpoint }
+    let outcome: ReplayOutcome
     try {
-      const cached = checkpoints.get(id)
+      const cached = checkpoints.get(session)
       const checkpoint = cached !== undefined && cached.lastSeq <= session.events.length ? cached : undefined
       outcome = reconstructFromSessionEvents(session.events, checkpoint)
     } catch (err: unknown) {
@@ -53,11 +55,7 @@ const install: InvariantInstaller = (ctx, fail) => {
       return
     }
     if (outcome.checkpoint) {
-      checkpoints.set(id, outcome.checkpoint)
-      if (checkpoints.size > MAX_CHECKPOINTS) {
-        const firstKey = checkpoints.keys().next().value
-        if (firstKey !== undefined) checkpoints.delete(firstKey)
-      }
+      checkpoints.set(session, outcome.checkpoint)
     }
     if (outcome.error) {
       fail(`Gauntlet replay invariant: session "${id}" — ${outcome.error.detail}`)
@@ -70,19 +68,19 @@ const install: InvariantInstaller = (ctx, fail) => {
   }
 
   /** Whether an event can change the gauntlet reconstruction for a session. */
-  const relevant = (sessionId: string, event: { type: string; data?: unknown }): boolean => {
+  const relevant = (session: object, event: { type: string; data?: unknown }): boolean => {
     if (event.type === 'tool/call') {
       const data = (event.data ?? {}) as Record<string, unknown>
       const isGauntletCall = data.name === 'gauntlet_loop'
-      if (isGauntletCall) gauntletSessions.add(sessionId)
+      if (isGauntletCall) gauntletSessions.add(session)
       return isGauntletCall
     }
     // A tool/result matters only when this session has gauntlet activity (its
     // verdicts/aborts are part of the reconstruction).
-    if (event.type === 'tool/result') return gauntletSessions.has(sessionId)
+    if (event.type === 'tool/result') return gauntletSessions.has(session)
     // Foreign vocabulary that could carry gauntlet state in future versions.
     if (typeof event.type === 'string' && event.type.startsWith('gauntlet/')) {
-      gauntletSessions.add(sessionId)
+      gauntletSessions.add(session)
       return true
     }
     return false
@@ -104,8 +102,8 @@ const install: InvariantInstaller = (ctx, fail) => {
   // Fold only when an event could advance the gauntlet fold, keeping the
   // per-event cost constant for ordinary (non-gauntlet) traffic.
   ctx.on('session/event', (session: unknown, event: unknown) => {
-    const id = String((session as { id?: unknown }).id ?? '')
-    if (!id || !relevant(id, event as { type: string; data?: unknown })) return
+    const sessionObject = session as object
+    if (!sessionObject || !relevant(sessionObject, event as { type: string; data?: unknown })) return
     foldSession(session as { id: string; events: readonly { type: string; time: number; data?: unknown }[] })
   }, { global: true })
 }

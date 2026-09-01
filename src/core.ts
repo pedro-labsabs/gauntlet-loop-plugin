@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 export type GauntletPhase = 'idle' | 'refine' | 'split' | 'loop' | 'report' | 'done' | 'halted'
 export type PieceStatus = 'pending' | 'awaiting_critique' | 'rebuild' | 'won'
 
@@ -176,9 +178,14 @@ function resetInto(state: GauntletState): void {
  * when the harness stamps slightly different wall-clock times.  Every field
  * that shapes the protocol's next transition is included, so any tampering
  * that changes a call's semantics produces a different fingerprint.
+ *
+ * Returns a FIXED-SIZE SHA-256 hex digest of a canonical (deterministically
+ * key-sorted) JSON representation — never the whole state JSON.  This keeps
+ * the persisted `tool/result.meta` constant-sized regardless of how large the
+ * accumulated state grows (no O(n²) write amplification).
  */
 export function stateFingerprint(state: GauntletState): string {
-  return JSON.stringify({
+  const payload = {
     phase: state.phase,
     runId: state.runId,
     rawCommand: state.rawCommand,
@@ -195,7 +202,29 @@ export function stateFingerprint(state: GauntletState): string {
     piecesState: state.piecesState,
     summary: state.summary,
     haltedReason: state.haltedReason,
-  })
+  }
+  return createHash('sha256').update(canonicalJson(payload)).digest('hex')
+}
+
+/**
+ * Deterministic JSON encoding with recursively sorted object keys, so the
+ * digest input is independent of key insertion order (a canonical form).
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value) ?? 'null'
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`
+  }
+  const record = value as Record<string, unknown>
+  const parts: string[] = []
+  for (const key of Object.keys(record).sort()) {
+    const child = record[key]
+    if (child === undefined) continue
+    parts.push(`${JSON.stringify(key)}:${canonicalJson(child)}`)
+  }
+  return `{${parts.join(',')}}`
 }
 
 function allAgentIds(state: GauntletState): Set<string> {

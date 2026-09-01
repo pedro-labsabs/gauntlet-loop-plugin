@@ -95,6 +95,29 @@ export interface ReplayOutcome {
   checkpoint?: ReplayCheckpoint
 }
 
+// ---- checkpoint cache (bound to Session instance identity) ----
+
+/**
+ * Per-session fold checkpoint cache keyed by the **Session instance identity**
+ * (`WeakMap`), NOT by `session.id`.  This ensures a new Session incarnation
+ * (same id, different instance) always starts with a clean checkpoint and
+ * re-verifies the full history — the cache can never accidentally become a
+ * source of truth across incarnations.
+ */
+export class ReplayCheckpointCache {
+  private readonly map = new WeakMap<object, ReplayCheckpoint>()
+
+  /** Retrieve the cached checkpoint for `session`, or `undefined` on a miss. */
+  get(session: object): ReplayCheckpoint | undefined {
+    return this.map.get(session)
+  }
+
+  /** Store a checkpoint for `session`. */
+  set(session: object, checkpoint: ReplayCheckpoint): void {
+    this.map.set(session, checkpoint)
+  }
+}
+
 // ---- public helpers ----
 
 /** Parse the raw `arguments` JSON string from a `tool/call` event into an action input. */

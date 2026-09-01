@@ -28,6 +28,7 @@ import {
 import {
   findCallTime,
   reconstructFromSessionEvents,
+  ReplayCheckpointCache,
   validateReconstructedState,
 } from '../lib/replay.js'
 
@@ -471,4 +472,65 @@ test('findCallTime returns the logged tool/call time for a callId', () => {
   actAndRecord(log, state, 'call-x', { action: 'submit', command: 'x' }, 42)
   assert.equal(findCallTime(log, 'call-x'), 42)
   assert.equal(findCallTime(log, 'missing'), undefined)
+})
+
+// ---- 11. Checkpoint incarnation isolation (WeakMap keyed by session instance) ----
+
+test('checkpoint never reused across a new session instance with the same id', () => {
+  const cache = new ReplayCheckpointCache()
+
+  // Incarnation A: id 'sess-1', log grown through submit+refine+split
+  const logA = []
+  const stateA = createInitialState()
+  let t = 1000
+  actAndRecord(logA, stateA, 'a-1', { action: 'submit', command: 'Landing page A.' }, t++)
+  actAndRecord(logA, stateA, 'a-2', { action: 'refine', refinedCommand: 'Hero under 1s LCP.', bar: BAR }, t++)
+  actAndRecord(logA, stateA, 'a-3', { action: 'split', pieces: [{ id: 'a1', title: 'Hero A', description: 'Hero A.' }] }, t++)
+  const { checkpoint: cpA } = reconstructFromSessionEvents(logA)
+  assert.ok(cpA)
+  const sessionA = { id: 'sess-1' }
+  cache.set(sessionA, cpA)
+
+  // Incarnation B: same id, DIFFERENT log with a different submit and more events
+  // than checkpoint.lastSeq — but it's a different object identity.
+  const logB = []
+  const stateB = createInitialState()
+  actAndRecord(logB, stateB, 'b-1', { action: 'submit', command: 'Dashboard B.' }, 5000)
+  actAndRecord(logB, stateB, 'b-2', { action: 'refine', refinedCommand: 'Dashboard p95 < 200ms.', bar: BAR }, 5001)
+  const sessionB = { id: 'sess-1' }
+
+  // WeakMap must return undefined for sessionB — different object identity.
+  assert.equal(cache.get(sessionB), undefined)
+
+  // The old checkpoint is NOT reused; reconstruction must produce B's state.
+  const { state: rebuiltB } = reconstructFromSessionEvents(logB, cache.get(sessionB))
+  assert.equal(rebuiltB.rawCommand, 'Dashboard B.')
+  assert.equal(rebuiltB.refinedCommand, 'Dashboard p95 < 200ms.')
+
+  // sessionA's checkpoint is still available for sessionA.
+  assert.ok(cache.get(sessionA))
+})
+
+// ---- 12. Fixed-size digest (SHA-256 hex, not full JSON) ----
+
+test('stateFingerprint returns a fixed-size SHA-256 hex digest', () => {
+  const small = createInitialState()
+  const large = createInitialState()
+  large.rawCommand = 'x'.repeat(10_000)
+  large.summary = { outcome: 'o'.repeat(5_000), lessons: 'l'.repeat(5_000) }
+
+  const fpSmall = stateFingerprint(small)
+  const fpLarge = stateFingerprint(large)
+
+  // SHA-256 hex = 64 characters
+  assert.equal(typeof fpSmall, 'string')
+  assert.equal(fpSmall.length, 64, `expected 64-char hex digest, got ${fpSmall.length}`)
+  assert.equal(fpLarge.length, 64, `expected 64-char hex digest, got ${fpLarge.length}`)
+
+  // Different states → different digests
+  assert.notEqual(fpSmall, fpLarge)
+
+  // Same state → same digest (deterministic)
+  assert.equal(stateFingerprint(small), fpSmall)
+  assert.equal(stateFingerprint(large), fpLarge)
 })

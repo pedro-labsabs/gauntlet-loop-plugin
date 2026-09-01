@@ -12,7 +12,8 @@
     "outDir": "lib",
     "declarationDir": "lib/types",
     "rootDir": "src",
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"]
   },
   "include": ["src"]
 }

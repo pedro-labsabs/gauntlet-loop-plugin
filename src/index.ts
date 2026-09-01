@@ -35,20 +35,22 @@ import {
   type GauntletActionInput,
   type GauntletResult,
 } from './core.js'
-import { findCallTime, reconstructFromSessionEvents, type ReplayCheckpoint } from './replay.js'
+import { findCallTime, reconstructFromSessionEvents, ReplayCheckpointCache } from './replay.js'
 import { renderToolValue } from './presentation.js'
 
 export const name = 'tool-gauntlet'
 export const inject = ['tools']
 
 /**
- * Per-session in-memory fold checkpoints keyed by `SessionId`.  A pure cache
- * of the last reconstruction position — NEVER a source of truth: the canonical
- * state is always derivable from (and verified against) the session event log.
+ * Per-session in-memory fold checkpoints keyed by the Session INSTANCE
+ * identity (`WeakMap`), not by `SessionId`.  A pure cache of the last
+ * reconstruction position — NEVER a source of truth: the canonical state is
+ * always derivable from (and verified against) the session event log.  A new
+ * Session incarnation with the same id always misses the cache and re-verifies
+ * the full history.
  * @see reconstructFromSessionEvents
  */
-const replayCheckpoints = new Map<string, ReplayCheckpoint>()
-const MAX_CACHE = 128
+const replayCheckpoints = new ReplayCheckpointCache()
 
 function detachedJson(value: unknown): JsonValue {
   return structuredClone(value) as JsonValue
@@ -154,7 +156,6 @@ export function apply(ctx: Context): void {
       }
 
       const session = agent.session
-      const sessionId = String(session.id ?? agent.id)
       const events = session.events
       const callId = String(exec.callId ?? '')
 
@@ -162,8 +163,10 @@ export function apply(ctx: Context): void {
       // The in-flight tool/call for THIS action is already in the log but has
       // no settled result yet, so reconstruction skips it — the base state is
       // exactly the state before the current action.  Resume from the cached
-      // checkpoint when it is still within the log (incremental fold).
-      const cached = replayCheckpoints.get(sessionId)
+      // checkpoint when it is still within the log (incremental fold).  The
+      // cache is keyed by the live Session instance, so a new incarnation
+      // (same id, different object) always re-verifies the full history.
+      const cached = replayCheckpoints.get(session)
       const checkpoint = cached !== undefined && cached.lastSeq <= events.length ? cached : undefined
       const reconstruction = reconstructFromSessionEvents(events, checkpoint)
       if (reconstruction.error) {
@@ -177,11 +180,7 @@ export function apply(ctx: Context): void {
         })
       }
       if (reconstruction.checkpoint) {
-        replayCheckpoints.set(sessionId, reconstruction.checkpoint)
-        if (replayCheckpoints.size > MAX_CACHE) {
-          const firstKey = replayCheckpoints.keys().next().value
-          if (firstKey !== undefined) replayCheckpoints.delete(firstKey)
-        }
+        replayCheckpoints.set(session, reconstruction.checkpoint)
       }
 
       // Deterministic `now`: prefer the current tool/call event time so the
