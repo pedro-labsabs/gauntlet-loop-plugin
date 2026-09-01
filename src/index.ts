@@ -30,6 +30,7 @@ import {
   createInitialState,
   GAUNTLET_PROTOCOL_VERSION,
   GAUNTLET_SCHEMA_VERSION,
+  GAUNTLET_PRESENTATION_VERSION,
   runGauntletAction,
   stateFingerprint,
   type GauntletActionInput,
@@ -37,6 +38,7 @@ import {
 } from './core.js'
 import { findCallTime, reconstructFromSessionEvents, ReplayCheckpointCache } from './replay.js'
 import { renderToolValue } from './presentation.js'
+import { registerGauntletProjection } from './projection.js'
 
 export const name = 'tool-gauntlet'
 export const inject = ['tools']
@@ -58,6 +60,10 @@ function detachedJson(value: unknown): JsonValue {
 
 /** Register the `gauntlet_loop` model-facing tool. */
 export function apply(ctx: Context): void {
+  // Register the Gauntlet session-projection unit (optional capability;
+  // without a composed registry the callback never runs).
+  registerGauntletProjection(ctx)
+
   const tool = defineTool({
     name: 'gauntlet_loop',
     description:
@@ -123,11 +129,22 @@ export function apply(ctx: Context): void {
       presentationMeta: (_args: unknown, value: JsonValue) => {
         const result = value as Partial<GauntletResult> | null
         const state = result?.state ?? null
+        const pres: Record<string, unknown> = {
+          version: GAUNTLET_PRESENTATION_VERSION,
+          phase: result?.phase ?? 'idle',
+          next: result?.next ?? null,
+        }
+        if (result?.nextPieceIndex !== undefined) pres.nextPieceIndex = result.nextPieceIndex
+        if (result?.error !== undefined) pres.error = result.error
+        if (result?.rejections !== undefined && result.rejections.length > 0) {
+          pres.rejections = result.rejections
+        }
         return detachedJson({
           protocol: GAUNTLET_PROTOCOL_VERSION,
           schema: GAUNTLET_SCHEMA_VERSION,
           ok: result?.ok === true,
           fingerprint: state ? stateFingerprint(state) : null,
+          presentation: pres,
         })
       },
     },

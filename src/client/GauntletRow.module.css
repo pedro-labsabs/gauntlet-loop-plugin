@@ -1,0 +1,491 @@
+/* Gauntlet toolview workbench card (CSS Modules).
+ * Class names are local; the client bundle compiles them to hashed selectors
+ * and injects the stylesheet (dsh-css-modules-inline pattern).  Colors use
+ * the shell's --dsw-* tokens only. */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* ---- Summary row (always visible) ---- */
+
+.row {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 24px;
+  gap: 6px;
+}
+
+.row[data-expandable] {
+  cursor: pointer;
+}
+
+.leading {
+  position: relative;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.chevron {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.iconIdle {
+  display: inline-flex;
+  opacity: 1;
+  transition: opacity 100ms ease;
+}
+
+.chevronHover {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.row:hover .iconIdle {
+  opacity: 0;
+}
+
+.row:hover .chevronHover {
+  opacity: 1;
+}
+
+.badge {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--dsw-alias-markdown-code-block-banner);
+  color: var(--dsw-alias-label-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.phaseTag {
+  flex: none;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.statusTag {
+  flex: none;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  padding: 0 5px;
+  border-radius: 3px;
+}
+
+.statusBlocked {
+  background: var(--dsw-alias-state-error-secondary);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.statusComplete {
+  background: var(--dsw-alias-state-success-secondary);
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.statusHalted {
+  background: var(--dsw-alias-state-warning-secondary);
+  color: var(--dsw-alias-state-warning-primary);
+}
+
+.statusRunning {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.barName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.nextAction {
+  flex: none;
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--dsw-alias-markdown-code-block-banner);
+  color: var(--dsw-alias-label-caption);
+  white-space: nowrap;
+}
+
+.progressBar {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.progressTrack {
+  width: 48px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--dsw-alias-border-l2);
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--dsw-alias-brand-secondary);
+  transition: width 200ms ease;
+}
+
+/* ---- Body (expandable) ---- */
+
+.bodyWrap {
+  display: flex;
+  flex-direction: column;
+  margin-top: 2px;
+  margin-left: 22px;
+  gap: 6px;
+}
+
+/* Blocked panel */
+
+.blockedPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-state-error-border);
+  border-radius: 8px;
+  background: var(--dsw-alias-state-error-secondary);
+}
+
+.blockedHeader {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dsw-alias-state-error-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.blockedError {
+  font-size: 12px;
+  color: var(--dsw-alias-state-error-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.rejectionList {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.rejection {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+  list-style: disc;
+}
+
+/* Units list */
+
+.unitsList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.unitRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  font-size: 12px;
+}
+
+.unitRow[role='button'] {
+  cursor: pointer;
+}
+
+.unitGlyph {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.unitId {
+  flex: none;
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.unitTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+}
+
+.roundCount {
+  flex: none;
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.unitStatusTag {
+  flex: none;
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-caption);
+}
+
+.unitPending {
+  opacity: 0.3;
+}
+
+/* Round history (inside unit expansion) */
+
+.roundsList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: 20px;
+  padding: 4px 0;
+}
+
+.roundHeader {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+  padding: 2px 0;
+}
+
+.roundDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-markdown-code-block);
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.detailRow {
+  display: flex;
+  gap: 4px;
+  align-items: baseline;
+}
+
+.detailLabel {
+  flex: none;
+  color: var(--dsw-alias-label-caption);
+  font-weight: 500;
+  min-width: 52px;
+}
+
+.detailValue {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.artifactLink {
+  color: var(--dsw-alias-brand-secondary);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--dsw-alias-brand-secondary);
+  text-underline-offset: 2px;
+}
+
+.artifactLink:hover {
+  color: var(--dsw-alias-brand-primary);
+  text-decoration-color: var(--dsw-alias-brand-primary);
+}
+
+/* Winner badge */
+
+.winnerBadge {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 4px;
+  border-radius: 3px;
+  line-height: 16px;
+  margin-right: 4px;
+}
+
+.winnerOurs {
+  background: var(--dsw-alias-state-success-secondary);
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.winnerBar {
+  background: var(--dsw-alias-state-error-secondary);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* Terminal summary */
+
+.terminalPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-markdown-code-block);
+}
+
+.terminalHeader {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Fallback row */
+
+.fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.fallbackTitle {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.fallbackReason {
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.fallbackCode {
+  margin: 0;
+  font-family: var(--dsw-font-markdown-code-block);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption);
+  max-height: 120px;
+  overflow: auto;
+}
+
+/* Inspect button */
+
+.inspectButton {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.card:hover .inspectButton,
+.inspectButton:focus-visible {
+  opacity: 1;
+}
+
+.inspectButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Running animation */
+
+@keyframes gauntletRowSweep {
+  0% { left: -300px; }
+  90%, 100% { left: 100%; }
+}
+
+.card[data-status='running'] .row::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 300px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--dsw-alias-bg-base) 60%, transparent) 55%,
+    transparent 100%
+  );
+  animation: gauntletRowSweep 2.6s ease-out infinite;
+  pointer-events: none;
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card[data-status='running'] .row::after {
+    animation: none;
+    display: none;
+  }
+
+  .iconIdle,
+  .chevronHover,
+  .inspectButton {
+    transition: none;
+  }
+}

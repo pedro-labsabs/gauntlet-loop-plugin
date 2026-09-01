@@ -67,16 +67,27 @@ Or install a local checkout/package into the profile:
 npm install
 npm run check
 npm pack
-dsh plugin --profile <profile> add ./gauntlet-loop-plugin-1.1.0.tgz
+dsh plugin --profile <profile> add ./gauntlet-loop-plugin-1.2.0.tgz
 ```
 
 The bundle inserts:
 
 ```yaml
 - insert:
-    - id: tool-gauntlet
+    - id: tool-gauntlet-loop
       name: gauntlet-loop-plugin
 ```
+
+> **Note:** the harness base bundle ships its own built-in row with the id
+> `tool-gauntlet` (`@deepseek-ai/dsh-tool-gauntlet`). Duplicate loader entry
+> ids abort the boot, so this bundle uses a unique id and the profile's user
+> layer must disable the built-in row to activate this plugin:
+>
+> ```yaml
+> - id: tool-gauntlet
+>   name: '@deepseek-ai/dsh-tool-gauntlet'
+>   disabled: true
+> ```
 
 ## Tool contract
 
@@ -111,7 +122,20 @@ State is durable: the canonical run is reconstructed from the session event log 
 - `src/presentation.ts` — deterministic dashboard renderer.
 - `src/index.ts` — thin DSH tool adapter + Host presentation card.
 - `src/invariant.ts` — package invariant companion; live replay/cross-event checks over the session log.
-- `test/` — protocol, visual renderer, restart/reconstruction, corruption, and real-session integration regression tests.
+- `src/projection.ts` — Host **session-projection unit**: folds the full durable log over `tool/call` + `tool/result` into a presentation DTO, registered via `ctx.sessionProjections`. Never runs `runGauntletAction`; applies only host-accepted facts. Copy-on-write transitions (pure fold).
+- `src/projection-types.ts` — shared wire DTO types + `SessionProjectionMap['gauntlet']` merge.
+- `src/client/` — browser half (Web Client dedicated workbench). `index.ts` registers the `gauntlet_loop` keyed toolview in `tool.call.toolview`; `GauntletRow.tsx` renders it from `useProjection('gauntlet')`; `model.ts` is a defensive wire parser + UI helpers (no client-side fold).
+- `test/` — protocol, visual renderer, restart/reconstruction, corruption, real-session integration, Host projection, and client model/component regression tests.
+
+## Web Client workbench
+
+The DSH Web Client renders each `gauntlet_loop` call through the official keyed tool-view slot (`tool.call.toolview`), backed by a Host session projection:
+
+- the **full workbench** (phase, status, bar, NEXT, progress, units, round history, blocked/rejections, terminal) appears on the card that matches the projection's current cut (`asOfCallId`);
+- **historical cards** (calls superseded by the current projection) render a stable per-call row derived from the frozen block + its own `meta.presentation` + textual output — they never drift toward the current projection;
+- malformed/old logs fall back to the generic textual card (fail-closed), never a fabricated workbench.
+
+The browser half ships as `exports["./client"]` + `dsh.client` and is bundled to `lib/client.js` in the DSH loader format. The Web UI is a **read-only projection** — it never becomes protocol authority.
 
 ## Credits
 
