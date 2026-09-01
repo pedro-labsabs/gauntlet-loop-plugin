@@ -27,6 +27,8 @@ describe('parseProjectionWire', () => {
     blocked: null,
     summary: null,
     haltedReason: null,
+    asOfSeq: null,
+    asOfCallId: null,
   }
 
   it('accepts a well-formed wire value', () => {

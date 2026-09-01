@@ -196,13 +196,12 @@ test('8. session isolation: two independent fold states', () => {
   assert.equal(dtoB.status, 'halted')
 })
 
-test('9. malformed args still yield an available projection', () => {
+test('9. malformed args with ok:true -> unavailable (fail-closed)', () => {
   let state = createInitialProjectionState()
   state = applyProjectionEvent(state, { type: 'tool/call', seq: 1, time: 1000, data: { turn: 1, step: 1, callId: 'c1', name: 'gauntlet_loop', arguments: 'not json' } })
   state = applyProjectionEvent(state, { type: 'tool/result', seq: 2, time: 2000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: false }], source: { kind: 'tool', callId: 'c1' } }, meta: { protocol: 1, schema: 2, ok: true, fingerprint: 'fp', presentation: { version: 1, phase: 'loop', next: 'build' } } } })
   const dto = projectionToDTO(state)
-  assert.equal(dto.available, true)
-  assert.equal(dto.phase, 'loop')
+  assert.equal(dto.available, false, 'malformed args with ok:true should fail closed')
 })
 
 test('10. non-gauntlet events return the same state reference (Object.is gate)', () => {
@@ -210,6 +209,82 @@ test('10. non-gauntlet events return the same state reference (Object.is gate)',
   const unrelated = { type: 'user/message', seq: 99, time: 99000, data: { content: [], source: 'test' } }
   const next = applyProjectionEvent(state, unrelated)
   assert.ok(Object.is(state, next))
+})
+
+
+// ---- Deep freeze + protocol/schema + asOfSeq ----
+
+test('DF. deepFreeze regression: apply build/critique does not mutate the original state', () => {
+  function deepFreeze(obj) {
+    if (obj === null || typeof obj !== 'object' || Object.isFrozen(obj)) return obj
+    const frozen = Object.isSealed(obj) || Object.isFrozen(obj) ? obj : Object.freeze(obj)
+    for (const value of Object.values(frozen)) deepFreeze(value)
+    return frozen
+  }
+  // Build a state with a pending call and a unit, then freeze it, then apply
+  let state = createInitialProjectionState()
+  // Register a pending call
+  state = applyProjectionEvent(state, { type: 'tool/call', seq: 1, time: 1000, data: { turn: 1, step: 1, callId: 'c1', name: 'gauntlet_loop', arguments: '{"action":"submit","command":"Go"}' } })
+  // Settle submit -> refine
+  state = applyProjectionEvent(state, { type: 'tool/result', seq: 2, time: 2000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: false }], source: { kind: 'tool', callId: 'c1' } }, meta: { protocol: 1, schema: 2, ok: true, fingerprint: 'fp', presentation: { version: 1, phase: 'refine', next: 'refine' } } } })
+  // Register refine + settle -> split
+  state = applyProjectionEvent(state, { type: 'tool/call', seq: 3, time: 3000, data: { turn: 1, step: 1, callId: 'c2', name: 'gauntlet_loop', arguments: '{"action":"refine","refinedCommand":"Objective.","bar":{"name":"Bar","fetchHow":"fetch","compareHow":"blind"}}' } })
+  state = applyProjectionEvent(state, { type: 'tool/result', seq: 4, time: 4000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c2', content: [], isError: false }], source: { kind: 'tool', callId: 'c2' } }, meta: { protocol: 1, schema: 2, ok: true, fingerprint: 'fp', presentation: { version: 1, phase: 'split', next: 'split' } } } })
+  // Register split + settle -> loop with one unit
+  state = applyProjectionEvent(state, { type: 'tool/call', seq: 5, time: 5000, data: { turn: 1, step: 1, callId: 'c3', name: 'gauntlet_loop', arguments: JSON.stringify({ action: 'split', pieces: [{ id: 'p1', title: 'Test', description: 'D.' }] }) } })
+  state = applyProjectionEvent(state, { type: 'tool/result', seq: 6, time: 6000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c3', content: [], isError: false }], source: { kind: 'tool', callId: 'c3' } }, meta: { protocol: 1, schema: 2, ok: true, fingerprint: 'fp', presentation: { version: 1, phase: 'loop', next: 'build', nextPieceIndex: 0 } } } })
+  // Register build call
+  state = applyProjectionEvent(state, { type: 'tool/call', seq: 7, time: 7000, data: { turn: 1, step: 1, callId: 'c4', name: 'gauntlet_loop', arguments: JSON.stringify({ action: 'build', pieceIndex: 0, builderSubagentId: 'b1', artifact: { location: 'src/a.ts', summary: 's' } }) } })
+  // Now freeze the state BEFORE settling the build result
+  const snapshot = JSON.parse(JSON.stringify(state))
+  deepFreeze(state)
+  // Apply the build result: must not throw, and the frozen state must not change
+  const nextState = applyProjectionEvent(state, { type: 'tool/result', seq: 8, time: 8000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c4', content: [], isError: false }], source: { kind: 'tool', callId: 'c4' } }, meta: { protocol: 1, schema: 2, ok: true, fingerprint: 'fp', presentation: { version: 1, phase: 'loop', next: 'critique' } } } })
+  // The original frozen state must be structurally identical to the pre-apply snapshot
+  assert.deepEqual(JSON.parse(JSON.stringify(state)), snapshot)
+  assert.ok(nextState !== state)
+  // The new state must have the build applied
+  assert.equal(nextState.units[0].rounds.length, 1)
+  assert.equal(nextState.units[0].rounds[0].builder, 'b1')
+})
+
+test('DF2. protocol mismatch -> unavailable', () => {
+  let state = createInitialProjectionState()
+  state = applyProjectionEvent(state, { type: 'tool/call', seq: 1, time: 1000, data: { turn: 1, step: 1, callId: 'c1', name: 'gauntlet_loop', arguments: '{"action":"submit"}' } })
+  // Wrong protocol version
+  state = applyProjectionEvent(state, { type: 'tool/result', seq: 2, time: 2000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: false }], source: { kind: 'tool', callId: 'c1' } }, meta: { protocol: 99, schema: 2, ok: true, fingerprint: 'fp', presentation: { version: 1, phase: 'refine', next: 'refine' } } } })
+  const dto = projectionToDTO(state)
+  assert.equal(dto.available, false)
+})
+
+test('DF3. schema mismatch -> unavailable', () => {
+  let state = createInitialProjectionState()
+  state = applyProjectionEvent(state, { type: 'tool/call', seq: 1, time: 1000, data: { turn: 1, step: 1, callId: 'c1', name: 'gauntlet_loop', arguments: '{"action":"submit"}' } })
+  state = applyProjectionEvent(state, { type: 'tool/result', seq: 2, time: 2000, data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: false }], source: { kind: 'tool', callId: 'c1' } }, meta: { protocol: 1, schema: 99, ok: true, fingerprint: 'fp', presentation: { version: 1, phase: 'refine', next: 'refine' } } } })
+  const dto = projectionToDTO(state)
+  assert.equal(dto.available, false)
+})
+
+test('DF4. settled call sets asOfSeq/asOfCallId on the DTO', () => {
+  const events = [
+    callEvent(1, 'c1', 'submit', { command: 'Go' }),
+    resultEvent(2, 'c1', true, 'refine', 'refine'),
+  ]
+  const dto = foldAll(events)
+  assert.equal(dto.asOfSeq, 2)
+  assert.equal(dto.asOfCallId, 'c1')
+})
+
+test('DF5. rejected call also sets asOfSeq/asOfCallId (the cut advances)', () => {
+  const events = [
+    callEvent(1, 'c1', 'submit', { command: 'Go' }),
+    resultEvent(2, 'c1', false, 'idle', 'submit', { presError: 'nope', presRejections: ['bad'] }),
+  ]
+  const dto = foldAll(events)
+  assert.equal(dto.asOfSeq, 2)
+  assert.equal(dto.asOfCallId, 'c1')
+  assert.equal(dto.available, true)
+  assert.equal(dto.status, 'blocked')
 })
 
 test('11. non-gauntlet tool/result without matching pending returns the same state', () => {

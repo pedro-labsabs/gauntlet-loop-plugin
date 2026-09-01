@@ -25,19 +25,110 @@ const DL = '\n\n'
  * Parse and validate a raw wire value as a GauntletProjectionDTO.
  * Returns null when the value is missing, malformed, or carries an
  * incompatible version — the caller must then fall back to the generic card.
- * Manual shape check (no zod in the client bundle); the host validates its
- * output via zod viewSchema.parse before it leaves.
+ * This is a STRICT structural validation of every field the UI actually
+ * consumes (units, rounds, won/total, bar/next, blocked, summary,
+ * haltedReason, asOfSeq/asOfCallId).  Manual shape check (no zod in the
+ * client bundle); the host validates its output via zod viewSchema.parse
+ * before it leaves.
  */
+const PHASES = new Set(['idle', 'refine', 'split', 'loop', 'report', 'done', 'halted'])
+const STATUSES = new Set(['running', 'blocked', 'complete', 'halted'])
+const UNIT_STATUSES = new Set(['pending', 'awaiting_critique', 'rebuild', 'won'])
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string'
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string'
+}
+
+function isValidRound(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return typeof value.round === 'number'
+    && isString(value.builder)
+    && isString(value.artifactLocation)
+    && isString(value.artifactSummary)
+    && isString(value.builderEvidence)
+    && isNullableString(value.critic)
+    && (value.winner === null || value.winner === 'ours' || value.winner === 'bar')
+    && isNullableString(value.criticNotes)
+    && isNullableString(value.criticEvidence)
+}
+
+function isValidUnit(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return isString(value.id)
+    && isString(value.title)
+    && typeof value.status === 'string' && UNIT_STATUSES.has(value.status)
+    && Array.isArray(value.rounds) && value.rounds.every(isValidRound)
+}
+
+function isValidBlocked(value: unknown): boolean {
+  if (value === null) return true
+  if (!isRecord(value)) return false
+  return isNullableString(value.error)
+    && Array.isArray(value.rejections) && value.rejections.every(isString)
+    && isString(value.phase)
+    && isNullableString(value.next)
+}
+
 export function parseProjectionWire(value: unknown): GauntletProjectionDTO | null {
-  if (value === null || value === undefined || typeof value !== 'object') return null
-  const obj = value as Record<string, unknown>
-  if (typeof obj.version !== 'number' || obj.version !== GAUNTLET_PROJECTION_VERSION) return null
-  if (obj.available !== true) return null
-  if (typeof obj.phase !== 'string' && obj.phase !== null) return null
-  if (typeof obj.status !== 'string') return null
-  const validStatuses = ['running', 'blocked', 'complete', 'halted']
-  if (!validStatuses.includes(obj.status as string)) return null
-  return value as GauntletProjectionDTO
+  if (!isRecord(value)) return null
+  if (typeof value.version !== 'number' || value.version !== GAUNTLET_PROJECTION_VERSION) return null
+  if (value.available !== true) return null
+  if (!(typeof value.phase === 'string' && PHASES.has(value.phase))) return null
+  if (!(typeof value.status === 'string' && STATUSES.has(value.status))) return null
+  if (!isNullableString(value.barName)) return null
+  if (!isNullableString(value.next)) return null
+  if (value.nextPieceIndex !== null && typeof value.nextPieceIndex !== 'number') return null
+  if (!Array.isArray(value.units) || !value.units.every(isValidUnit)) return null
+  if (typeof value.won !== 'number' || typeof value.total !== 'number') return null
+  if (typeof value.totalRounds !== 'number') return null
+  if (!isValidBlocked(value.blocked)) return null
+  if (value.summary !== null && !(isRecord(value.summary)
+    && isString(value.summary.outcome) && isString(value.summary.lessons))) return null
+  if (!isNullableString(value.haltedReason)) return null
+  if (value.asOfSeq !== null && typeof value.asOfSeq !== 'number') return null
+  if (!isNullableString(value.asOfCallId)) return null
+  return value as unknown as GauntletProjectionDTO
+}
+
+
+// ---- Per-call stable envelope (for historical cards) ----
+
+/** The bounded presentation envelope persisted on ONE tool/result.meta. */
+export interface BlockPresentationView {
+  phase: string | null
+  next: string | null
+  error?: string
+  rejections?: string[]
+}
+
+/**
+ * Read the per-call presentation envelope from a frozen ToolResultNode's
+ * meta.  Used to render a STABLE historical card (the state as of that
+ * individual call), never the current session projection.  Returns null when
+ * the envelope is missing/incompatible — the caller shows raw output.
+ */
+export function parseBlockPresentation(meta: unknown): BlockPresentationView | null {
+  if (!isRecord(meta)) return null
+  const pres = meta.presentation
+  if (!isRecord(pres)) return null
+  if (typeof pres.version !== 'number' || pres.version !== GAUNTLET_PROJECTION_VERSION) return null
+  if (typeof pres.phase !== 'string' || pres.phase === '') return null
+  return {
+    phase: pres.phase,
+    next: isNullableString(pres.next) ? pres.next : null,
+    ...(typeof pres.error === 'string' ? { error: pres.error } : {}),
+    ...(Array.isArray(pres.rejections) && pres.rejections.every(isString)
+      ? { rejections: pres.rejections as string[] }
+      : {}),
+  }
 }
 
 // ---- UI helpers ----

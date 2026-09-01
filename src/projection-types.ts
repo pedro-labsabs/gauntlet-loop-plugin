@@ -72,6 +72,10 @@ export interface GauntletProjectionDTO {
   summary: { outcome: string; lessons: string } | null
   /** Reason when the gauntlet was halted. */
   haltedReason: string | null
+  /** Seq of the last settled gauntlet result this projection reflects (the cut witness). */
+  asOfSeq: number | null
+  /** CallId of the last settled gauntlet result this projection reflects. */
+  asOfCallId: string | null
 }
 
 declare module '@deepseek-ai/dsh-session-projection/types' {

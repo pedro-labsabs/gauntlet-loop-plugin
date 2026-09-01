@@ -24,7 +24,7 @@ import type {
   RunningToolCall, ToolCallBlock, ToolResultNode,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import {
-  parseProjectionWire, isOpenablePath, resultText, actionOf, boundedText, unitGlyphStatus,
+  parseProjectionWire, parseBlockPresentation, isOpenablePath, resultText, actionOf, boundedText, unitGlyphStatus,
   type GauntletProjectionDTO, type BlockedDTO, type ProjectedRoundDTO, type ProjectedUnitDTO,
 } from './model.ts'
 import { type GauntletKey } from './locale.ts'
@@ -258,17 +258,115 @@ const GenericFallback = memo(function GenericFallback({
  * @param props - keyed toolview payload plus the gauntlet locale seat.
  * @returns the dedicated workbench card.
  */
+
+// ---- Historical per-call stable row (block-derived, never drifts) ----
+
+const HistoricalCard = memo(function HistoricalCard({
+  block, t, openFile, inspect,
+}: {
+  block: ToolCallBlock
+  t: GauntletRowProps['t']
+  openFile: (path: string) => void
+  inspect?: (() => void) | undefined
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const isRunning = !('kind' in block)
+  const settled = isRunning ? null : block as ToolResultNode
+  const action = isRunning
+    ? actionOf((block as RunningToolCall).argsRaw)
+    : actionOf(settled !== null ? settled.call?.argsRaw ?? null : null)
+  const title = action !== '' ? `${t('row.gauntlet')} · ${action}` : t('row.gauntlet')
+  const output = settled !== null ? resultText(settled.content, settled.error) : null
+  const pres = settled !== null ? parseBlockPresentation(settled.meta) : null
+  const showBlocked = !isRunning && pres?.error !== undefined
+  const expandable = output !== null || showBlocked
+  const open = expanded && expandable
+
+  const toggleExpand = (): void => setExpanded(v => !v)
+  const toggleFromKeyboard = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (!expandable || (event.key !== 'Enter' && event.key !== ' ')) return
+    event.preventDefault()
+    toggleExpand()
+  }
+  const disclosureProps = expandable ? {
+    role: 'button' as const,
+    tabIndex: 0,
+    'aria-expanded': open,
+    'aria-label': open ? t('row.collapse') : t('row.expand'),
+    onClick: toggleExpand,
+    onKeyDown: toggleFromKeyboard,
+  } : {}
+
+  const state = isRunning || settled === null ? 'running' : settled.error?.code === 'interrupted' ? 'stopped' : 'ok'
+  return (
+    <div className={css.card} data-tool="gauntlet_loop" data-state={state}>
+      <div
+        className={css.row}
+        data-expandable={expandable || undefined}
+        {...disclosureProps}
+      >
+        <span className={css.leading}>
+          {open
+            ? <IconChevronDownOutline14 size={14} />
+            : <>
+              <span className={css.iconIdle}><IconSparkle16 size={14} /></span>
+              <IconChevronDownOutline14 className={`${css.chevron} ${css.chevronHover}`} size={14} />
+            </>}
+        </span>
+        <span className={css.badge}>{t('row.gauntlet')}</span>
+        {pres?.phase !== null && pres?.phase !== undefined ? (
+          <span className={css.phaseTag}>{pres.phase}</span>
+        ) : null}
+        {isRunning ? (
+          <span className={`${css.statusTag} ${css.statusRunning}`}>{t('row.running')}</span>
+        ) : null}
+        {pres !== null && pres !== undefined && pres.next !== null ? (
+          <span className={css.nextAction}>{t('row.next')} {pres.next}</span>
+        ) : null}
+      </div>
+      {open ? (
+        <div className={css.bodyWrap}>
+          {showBlocked ? (
+            <div className={css.blockedPanel} role="alert">
+              <div className={css.blockedHeader}>{t('row.blockedHeading')}</div>
+              {pres.error ? <div className={css.blockedError}>{pres.error}</div> : null}
+              {pres.rejections && pres.rejections.length > 0 ? (
+                <ul className={css.rejectionList}>
+                  {pres.rejections.slice(0, 5).map((r, i) => (
+                    <li key={i} className={css.rejection}>{r}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+          {output !== null ? (
+            <pre className={css.fallbackCode}>{boundedText(output)}</pre>
+          ) : null}
+          {inspect !== undefined ? (
+            <button type="button" className={css.inspectButton} onClick={inspect}>
+              <IconInspectOutline12 />
+              {t('row.inspect')}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+})
 export function GauntletRow({ block, useProjection, openFile, inspect, t }: GauntletRowProps) {
   const [expanded, setExpanded] = useState(false)
   const [openUnits, setOpenUnits] = useState<ReadonlySet<string>>(new Set())
 
-  // Finished whole value from the Host projection unit; undefined = the
-  // capability is absent (unit not registered / baseline not yet seeded) or
-  // the value is malformed — all handled as a safe fallback.
   const workbench = useProjection('gauntlet')
   const projection = parseProjectionWire(workbench)
 
-  // ---- Fallback: unavailable projection renders generic/textual ----
+  // Determine if this settled card is the projection's current cut
+  // (the last settled gauntlet result the DTO reflects).
+  const isSettled = 'kind' in block
+  const isCurrentCut = isSettled && projection !== null
+    && projection.asOfCallId !== null && block.callId === projection.asOfCallId
+
+  // --- Fallback: unavailable projection or capability absent ---
   if (projection === null || !projection.available) {
     return (
       <GenericFallback
@@ -280,8 +378,13 @@ export function GauntletRow({ block, useProjection, openFile, inspect, t }: Gaun
     )
   }
 
-  // ---- Header ----
-  const isRunning = !('kind' in block)
+  // --- Historical card (not the current cut): stable per-call representation ---
+  if (!isCurrentCut) {
+    return <HistoricalCard block={block} t={t} openFile={openFile} inspect={inspect} />
+  }
+
+  // --- Current cut: full workbench ---
+  const isRunning = !isSettled
   const action = isRunning
     ? actionOf((block as RunningToolCall).argsRaw)
     : actionOf((block as ToolResultNode).call?.argsRaw ?? null)

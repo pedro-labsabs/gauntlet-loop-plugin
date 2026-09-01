@@ -64,6 +64,8 @@ function dto(overrides: Partial<GauntletProjectionDTO> = {}): GauntletProjection
     blocked: null,
     summary: null,
     haltedReason: null,
+    asOfSeq: 1,
+    asOfCallId: 'call-gl',
     ...overrides,
   }
 }
@@ -238,6 +240,68 @@ describe('GauntletRow', () => {
     expect(row.getAttribute('role')).toBe('button')
     expect(row.getAttribute('aria-label')).toBe('Expand gauntlet')
     expect(row.getAttribute('aria-expanded')).toBe('false')
+  })
+
+
+  it('historical card does NOT drift: call A keeps its own state after projection advances to call B', () => {
+    // Call A block (seq 1, callId call-gl) settled as submit -> refine
+    const blockA: ToolResultNode = {
+      kind: 'tool-result',
+      seq: 1,
+      time: 1000,
+      callId: 'call-gl',
+      call: { name: 'gauntlet_loop', argsRaw: '{"action":"submit"}' },
+      callTime: 900,
+      content: [{ type: 'text', text: 'Comando recebido. Refine o objetivo.' }],
+      isError: false,
+      meta: {
+        protocol: 1, schema: 2, ok: true, fingerprint: 'fp',
+        presentation: { version: 1, phase: 'refine', next: 'refine' },
+      },
+      callView: null,
+      resultView: null,
+      subCalls: [],
+    }
+    // Projection A: cut at call A (submit, refine)
+    const projectionA = dto({ phase: 'refine', next: 'refine', status: 'running', units: [], won: 0, total: 0, asOfSeq: 1, asOfCallId: 'call-gl' })
+    const viewA = renderWithProjection(projectionA, blockA)
+    expect(viewA.container.textContent).toContain('refine')
+
+    // Projection advances to call B (complete)
+    const projectionB = dto({ phase: 'done', status: 'complete', summary: { outcome: 'Done', lessons: 'L' }, asOfSeq: 9, asOfCallId: 'call-B' })
+    const viewB = renderWithProjection(projectionB, blockA)
+    // Call A must NOT show call B's terminal state
+    expect(viewB.container.textContent).not.toContain('Complete')
+    expect(viewB.container.textContent).not.toContain('Done')
+    // It still shows A's own phase (from the frozen block meta)
+    expect(viewB.container.textContent).toContain('refine')
+  })
+
+  it('full workbench renders only on the cut card (asOfCallId match)', () => {
+    // Settled block with a DIFFERENT callId than the projection cut -> historical row
+    const block: ToolResultNode = {
+      kind: 'tool-result',
+      seq: 2,
+      time: 2000,
+      callId: 'call-other',
+      call: { name: 'gauntlet_loop', argsRaw: '{"action":"refine"}' },
+      callTime: 1900,
+      content: [{ type: 'text', text: 'old text' }],
+      isError: false,
+      meta: { protocol: 1, schema: 2, ok: true, fingerprint: 'fp', presentation: { version: 1, phase: 'split', next: 'split' } },
+      callView: null,
+      resultView: null,
+      subCalls: [],
+    }
+    // Projection cut is at call-gl
+    const view = renderWithProjection(dto(), block)
+    // Not the cut card -> shows the historical row, not the full workbench
+    expect(view.container.textContent).not.toContain('1/1')
+    expect(view.container.textContent).toContain('split')
+    // Expand the historical row to see its own textual output
+    fireEvent.click(view.container.querySelector('[data-expandable]')!)
+    expect(view.container.textContent).toContain('old text')
+    expect(view.container.textContent).not.toContain('1/1')
   })
 
   it('artifact path click calls openFile only for filesystem-like paths', () => {

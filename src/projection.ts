@@ -31,17 +31,38 @@
  * the bounded `meta.presentation` envelope) combined with the persisted
  * `tool/call` arguments.
  *
+ * === Pure fold (copy-on-write) ===
+ *
+ * `applyProjectionEvent` never mutates the received `state` or any nested
+ * object belonging to it. Mutable transitions (build/critique) copy the units
+ * array, the target unit, and its rounds before changing anything — the
+ * registry relies on `Object.is` identity as part of its change gate, so an
+ * in-place mutation of a shared reference would both corrupt the previous
+ * state and defeat change detection.
+ *
  * === Fail-closed ===
  *
  * A settled gauntlet call whose `meta` lacks a compatible `presentation`
- * envelope marks the projection `available: false` — the client then renders
- * the safe generic/textual fallback instead of a fabricated workbench.
+ * envelope, carries an unexpected protocol/schema version, or arrives with
+ * unparseable arguments while accepted, marks the projection
+ * `available: false` — the client then renders the safe generic/textual
+ * fallback instead of a fabricated workbench.
+ *
+ * === Historical cards ===
+ *
+ * The DTO carries an `asOfSeq` / `asOfCallId` witness (the last settled
+ * gauntlet call folded). The client renders the full workbench only for the
+ * card that matches that cut; superseded historical cards fall back to a
+ * stable per-call representation derived from the frozen `block` itself, so
+ * an old card never drifts toward the current projection.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { GAUNTLET_PRESENTATION_VERSION } from './core.js'
+import {
+  GAUNTLET_PRESENTATION_VERSION, GAUNTLET_PROTOCOL_VERSION, GAUNTLET_SCHEMA_VERSION,
+} from './core.js'
 import type {
   GauntletProjectionDTO, GauntletPhaseDTO, GauntletStatusDTO, ProjectedRoundDTO, UnitStatusDTO,
 } from './projection-types.js'
@@ -76,7 +97,11 @@ export interface GauntletProjectionState {
   lastRejectedPhase: string
   lastRejectedNext: string | null
   /** In-flight tool/call records (callId → parsed args) awaiting their tool/result. */
-  pending: Record<string, { args: Record<string, unknown>; time: number }>
+  pending: Record<string, { args: Record<string, unknown> | null; time: number }>
+  /** Seq of the last settled gauntlet result folded (the projection's cut). */
+  lastSeq: number | null
+  /** CallId of the last settled gauntlet result folded. */
+  lastCallId: string | null
 }
 
 // ---- zod schemas (the unit contract requires ZodType) ----
@@ -115,9 +140,11 @@ const stateSchema = z.object({
   lastRejectedPhase: z.string(),
   lastRejectedNext: z.string().nullable(),
   pending: z.record(z.string(), z.object({
-    args: z.record(z.string(), z.unknown()),
+    args: z.record(z.string(), z.unknown()).nullable(),
     time: z.number(),
   })),
+  lastSeq: z.number().nullable(),
+  lastCallId: z.string().nullable(),
 })
 
 const dtoSchema = z.object({
@@ -153,19 +180,25 @@ const dtoSchema = z.object({
   }).nullable(),
   summary: z.object({ outcome: z.string(), lessons: z.string() }).nullable(),
   haltedReason: z.string().nullable(),
+  asOfSeq: z.number().nullable(),
+  asOfCallId: z.string().nullable(),
 })
 
 // ---- Parsing helpers ----
 
-function parseCallArguments(raw: unknown): Record<string, unknown> {
-  if (typeof raw !== 'string') return {}
+/**
+ * Parse the wire arguments JSON. Returns `null` on a genuine parse failure
+ * (distinct from a legitimate `{}`), so an accepted call with unparseable
+ * args can fail closed instead of pretending the facts are provable.
+ */
+function parseCallArguments(raw: unknown): Record<string, unknown> | null {
+  if (typeof raw !== 'string') return null
   try {
     const parsed = JSON.parse(raw)
-    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : {}
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    return parsed as Record<string, unknown>
   } catch {
-    return {}
+    return null
   }
 }
 
@@ -199,10 +232,15 @@ function readPresentation(meta: unknown): {
   }
 }
 
-/** Whether the settled result carries a verification meta with a compatible envelope. */
+/** Whether the settled result carries a verification meta with compatible protocol/schema and an ok flag. */
 function readOk(meta: unknown): boolean | null {
   if (meta === null || typeof meta !== 'object') return null
-  const ok = (meta as Record<string, unknown>).ok
+  const obj = meta as Record<string, unknown>
+  const protocol = typeof obj.protocol === 'number' ? obj.protocol : -1
+  const schema = typeof obj.schema === 'number' ? obj.schema : -1
+  if (protocol !== GAUNTLET_PROTOCOL_VERSION) return null
+  if (schema !== GAUNTLET_SCHEMA_VERSION) return null
+  const ok = obj.ok
   return typeof ok === 'boolean' ? ok : null
 }
 
@@ -228,6 +266,9 @@ function argsArray(args: Record<string, unknown>, key: string): unknown[] | null
 }
 
 // ---- Action application (facts only; no protocol validation) ----
+// Pure: every mutable transition clones the units array + affected unit +
+// its rounds before touching anything. The received state is treated as
+// read-only (copy-on-write).
 
 function applyAction(
   state: GauntletProjectionState,
@@ -252,29 +293,34 @@ function applyAction(
       break
     }
     case 'split': {
-      state.units = []
       const pieces = argsArray(args, 'pieces')
+      const units: GauntletProjectionState['units'] = []
       if (pieces !== null) {
         for (const piece of pieces) {
           if (typeof piece !== 'object' || piece === null) continue
           const p = piece as Record<string, unknown>
-          const id = argsString(p, 'id') ?? "p" + (state.units.length + 1)
+          const id = argsString(p, 'id') ?? "p" + (units.length + 1)
           const title = argsString(p, 'title') ?? id
-          state.units.push({ id, title, rounds: [] })
+          units.push({ id, title, rounds: [] })
         }
       }
+      state.units = units
       break
     }
     case 'build': {
       const index = argsNumber(args, 'pieceIndex')
       if (index === undefined) break
-      const unit = state.units[index]
-      if (unit === undefined) break
+      const current = state.units[index]
+      if (current === undefined) break
       const builder = argsString(args, 'builderSubagentId') ?? ''
       const artifact = argsObject(args, 'artifact')
       const artifactLocation = artifact !== null ? argsString(artifact, 'location') ?? '' : ''
       const artifactSummary = artifact !== null ? argsString(artifact, 'summary') ?? '' : ''
       const builderEvidence = argsString(args, 'builderEvidence') ?? ''
+      // Copy-on-write: clone units + target unit + its rounds, then push.
+      const units = state.units.map(unit => ({ ...unit, rounds: unit.rounds.slice() }))
+      const unit = units[index]
+      if (unit === undefined) break
       unit.rounds.push({
         round: unit.rounds.length + 1,
         builder,
@@ -286,23 +332,33 @@ function applyAction(
         criticNotes: null,
         criticEvidence: null,
       })
+      state.units = units
       break
     }
     case 'critique': {
       const index = argsNumber(args, 'pieceIndex')
       if (index === undefined) break
-      const unit = state.units[index]
-      if (unit === undefined || unit.rounds.length === 0) break
-      const lastRound = unit.rounds[unit.rounds.length - 1]
+      const current = state.units[index]
+      if (current === undefined || current.rounds.length === 0) break
       const critic = argsString(args, 'criticSubagentId') ?? ''
       const verdict = argsObject(args, 'verdict')
-      if (verdict !== null) {
-        const winner = verdict.winner
-        lastRound.critic = critic
-        lastRound.winner = winner === 'ours' || winner === 'bar' ? winner : null
-        lastRound.criticNotes = argsString(verdict, 'notes') ?? null
-        lastRound.criticEvidence = argsString(verdict, 'evidence') ?? null
-      }
+      if (verdict === null) break
+      const winner = verdict.winner
+      if (winner !== 'ours' && winner !== 'bar') break
+      const notes = argsString(verdict, 'notes') ?? null
+      const evidence = argsString(verdict, 'evidence') ?? null
+      // Copy-on-write: clone units + target unit + rounds + target round.
+      const units = state.units.map(unit => ({ ...unit, rounds: unit.rounds.slice() }))
+      const unit = units[index]
+      if (unit === undefined || unit.rounds.length === 0) break
+      const roundIndex = unit.rounds.length - 1
+      const lastRound = { ...unit.rounds[roundIndex] }
+      lastRound.critic = critic
+      lastRound.winner = winner
+      lastRound.criticNotes = notes
+      lastRound.criticEvidence = evidence
+      unit.rounds[roundIndex] = lastRound
+      state.units = units
       break
     }
     case 'complete': {
@@ -348,16 +404,17 @@ export function createInitialProjectionState(): GauntletProjectionState {
     lastRejectedPhase: 'idle',
     lastRejectedNext: null,
     pending: {},
+    lastSeq: null,
+    lastCallId: null,
   }
 }
 
-/** Pure incremental fold: previous state + one committed session event. */
+/** Pure incremental fold: previous state + one committed session event (never mutates the input). */
 export function applyProjectionEvent(
   state: GauntletProjectionState,
   event: SessionEvent,
 ): GauntletProjectionState {
-  // In-flight gauntlet tool/call: record the parsed args, return a new state
-  // (only for gauntlet_loop calls).
+  // In-flight gauntlet tool/call: record the parsed args, return a new state.
   if (event.type === 'tool/call' && event.data.name === 'gauntlet_loop') {
     const callId = String(event.data.callId)
     const next: GauntletProjectionState = { ...state, pending: { ...state.pending } }
@@ -395,7 +452,7 @@ export function applyProjectionEvent(
       ...state,
       pending,
       available: false,
-      unavailableReason: 'settled gauntlet call has no verification meta',
+      unavailableReason: 'settled gauntlet call has no verification meta (or protocol/schema mismatch)',
     }
   }
   const pres = readPresentation(meta)
@@ -414,6 +471,8 @@ export function applyProjectionEvent(
     phase: pres.phase,
     next: pres.next ?? null,
     nextPieceIndex: pres.nextPieceIndex ?? null,
+    lastSeq: event.seq,
+    lastCallId: callId,
   }
 
   if (ok) {
@@ -421,6 +480,13 @@ export function applyProjectionEvent(
     next.lastRejected = false
     next.lastRejectionError = null
     next.lastRejections = []
+    if (pendingCall.args === null) {
+      return {
+        ...next,
+        available: false,
+        unavailableReason: 'accepted gauntlet call has unparseable arguments',
+      }
+    }
     applyAction(next, argsString(pendingCall.args, 'action') ?? '', pendingCall.args)
   } else {
     // Rejected: presented state unchanged; record the blocked panel.
@@ -466,6 +532,8 @@ export function projectionToDTO(state: GauntletProjectionState): GauntletProject
     blocked,
     summary: state.summary,
     haltedReason: state.haltedReason,
+    asOfSeq: state.lastSeq,
+    asOfCallId: state.lastCallId,
   }
   if (state.unavailableReason !== undefined) dto.unavailableReason = state.unavailableReason
   return dto
