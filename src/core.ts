@@ -19,6 +19,14 @@ export const GAUNTLET_PROTOCOL_VERSION = 1
  */
 export const GAUNTLET_SCHEMA_VERSION = 2
 
+/**
+ * Version of the wire presentation envelope that the tool embeds in
+ * `tool/result.meta.presentation` for the Web Client toolview.  Bump only
+ * when the client-side projection model needs to distinguish new envelope
+ * fields from old ones — the client fail-closes on version mismatch.
+ */
+export const GAUNTLET_PRESENTATION_VERSION = 1
+
 export interface QualityBar {
   name: string
   fetchHow: string

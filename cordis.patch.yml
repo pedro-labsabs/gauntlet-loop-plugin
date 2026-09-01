@@ -1,3 +1,7 @@
 - insert:
-    - id: tool-gauntlet
+    # Unique entry id: the harness base bundle already ships its own row with
+    # id "tool-gauntlet" (@deepseek-ai/dsh-tool-gauntlet), and duplicate
+    # loader entry ids abort the boot. Disable that built-in row in the
+    # profile's user layer (cordis.patch.yml) to activate this plugin.
+    - id: tool-gauntlet-loop
       name: gauntlet-loop-plugin

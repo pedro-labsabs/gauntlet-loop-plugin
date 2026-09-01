@@ -74,9 +74,20 @@ The bundle inserts:
 
 ```yaml
 - insert:
-    - id: tool-gauntlet
+    - id: tool-gauntlet-loop
       name: gauntlet-loop-plugin
 ```
+
+> **Note:** the harness base bundle ships its own built-in row with the id
+> `tool-gauntlet` (`@deepseek-ai/dsh-tool-gauntlet`). Duplicate loader entry
+> ids abort the boot, so this bundle uses a unique id and the profile's user
+> layer must disable the built-in row to activate this plugin:
+>
+> ```yaml
+> - id: tool-gauntlet
+>   name: '@deepseek-ai/dsh-tool-gauntlet'
+>   disabled: true
+> ```
 
 ## Tool contract
 
