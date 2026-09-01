@@ -9,11 +9,10 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "outDir": "lib/types",
+    "outDir": "lib",
+    "declarationDir": "lib/types",
     "rootDir": "src",
     "forceConsistentCasingInFileNames": true
   },
-  "include": [
-    "src"
-  ]
+  "include": ["src"]
 }
