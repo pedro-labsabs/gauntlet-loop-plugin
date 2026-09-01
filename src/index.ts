@@ -1,11 +1,18 @@
 /**
  * Stateful Gauntlet Loop protocol for DeepSeek Harness.
  *
- * The tool is intentionally an orchestrator/state-machine rather than a builder:
- * the lead agent must delegate real work to fresh builder/critic sub-agents, then
- * register auditable artifacts and evidence here. The state machine refuses the
- * common fake-gauntlet shortcuts (self-critique, critique-before-build, reused
- * critic context, empty artifact locations, non-blind verdicts).
+ * The tool reconstructs its canonical state from the durable session event log
+ * by replaying every settled `gauntlet_loop` tool call through the pure core
+ * state machine (`src/core.ts`).  No in-memory mutable state is maintained
+ * between calls — the session event log IS the durable source of truth.
+ *
+ * On restart/reload the session log is replayed from persistence (JSONL/SQLite),
+ * and the first tool call after reload reconstructs the exact pre-restart state
+ * (timestamps derived from event times, so live execution and replay agree).
+ *
+ * Cross-session isolation is guaranteed: each session has its own event log.
+ * The 'anonymous' fallback is removed — a tool call without an owning agent
+ * session is rejected.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -16,33 +23,12 @@ import {
   createInitialState,
   runGauntletAction,
   type GauntletActionInput,
-  type GauntletState,
 } from './core.js'
+import { findCallTime, reconstructFromSessionEvents } from './replay.js'
 import { renderToolValue } from './presentation.js'
 
 export const name = 'tool-gauntlet'
 export const inject = ['tools']
-
-const MAX_SESSION_STATES = 128
-const SESSION_STATES = new Map<string, GauntletState>()
-
-function stateKey(exec: ToolExecution): string {
-  return exec.agent?.id ?? 'anonymous'
-}
-
-function stateFor(exec: ToolExecution): GauntletState {
-  const key = stateKey(exec)
-  let state = SESSION_STATES.get(key)
-  if (state) return state
-
-  if (SESSION_STATES.size >= MAX_SESSION_STATES) {
-    const first = SESSION_STATES.keys().next().value as string | undefined
-    if (first !== undefined) SESSION_STATES.delete(first)
-  }
-  state = createInitialState()
-  SESSION_STATES.set(key, state)
-  return state
-}
 
 function detachedJson(value: unknown): JsonValue {
   return structuredClone(value) as JsonValue
@@ -68,7 +54,7 @@ export function apply(ctx: Context): void {
         description: 'Protocol action.',
       },
       command: { type: 'string', description: 'Raw user goal (submit).' },
-      refinedCommand: { type: 'string', description: 'Objective/mensurable command after refinement (refine).' },
+      refinedCommand: { type: 'string', description: 'Objective/measurable command after refinement (refine).' },
       bar: {
         type: 'json',
         description: 'Real quality bar {name, fetchHow, compareHow, description}. name must identify a specific reference; fetchHow must be reproducible; compareHow must describe a blind comparison.',
@@ -121,12 +107,45 @@ export function apply(ctx: Context): void {
       content: result.content,
     }),
     async execute(args: Record<string, unknown>, exec: ToolExecution): Promise<JsonValue> {
-      const liveState = stateFor(exec)
-      const result = runGauntletAction(
-        liveState,
-        args as unknown as GauntletActionInput,
-        { now: Date.now(), runId: String(exec.callId) },
-      )
+      // ---- session guard: no 'anonymous' fallback ----
+      const agent = exec.agent
+      if (!agent?.session) {
+        return detachedJson({
+          ok: false,
+          phase: 'idle',
+          error: 'gauntlet_loop requires an owning agent session (no global anonymous state)',
+          next: null,
+          state: createInitialState(),
+        })
+      }
+
+      const session = agent.session
+      const events = session.events
+      const callId = String(exec.callId ?? '')
+
+      // ---- reconstruct the canonical state from the durable session log ----
+      // The in-flight tool/call for THIS action is already in the log but has
+      // no settled result yet, so reconstruction skips it — the base state is
+      // exactly the state before the current action.
+      const reconstruction = reconstructFromSessionEvents(events)
+      if (reconstruction.error) {
+        // Fail closed: never serve a corrupted Gauntlet as valid.
+        return detachedJson({
+          ok: false,
+          phase: 'idle',
+          error: `Gauntlet state reconstruction failed: ${reconstruction.error.detail}`,
+          next: null,
+          state: reconstruction.state,
+        })
+      }
+
+      // Deterministic `now`: prefer the current tool/call event time so the
+      // live action and its later replay agree byte-for-byte.
+      const now = findCallTime(events, callId) ?? Date.now()
+
+      // ---- apply the current action through the core (exactly once) ----
+      const result = runGauntletAction(reconstruction.state, args as unknown as GauntletActionInput, { now, runId: callId })
+
       // DSH deep-freezes canonical tool values. Never return the live mutable
       // session state object or subsequent protocol actions would mutate frozen data.
       return detachedJson(result)
