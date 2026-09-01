@@ -1,13 +1,13 @@
 {
   "name": "gauntlet-loop-plugin",
-  "description": "Gauntlet Loop plugin for DeepSeek Harness (DSH): anti-subjectivity command refinement plus builder/critic sub-agent quality loop",
-  "version": "1.0.0",
+  "description": "Auditable Gauntlet Loop protocol and visual workbench for DeepSeek Harness (DSH)",
+  "version": "1.1.0",
   "publishConfig": {
     "access": "public"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/RenyEnnos/gauntlet-loop-plugin.git"
+    "url": "git+https://github.com/pedro-labsabs/gauntlet-loop-plugin.git"
   },
   "type": "module",
   "main": "lib/index.js",
@@ -21,20 +21,40 @@
       "types": "./lib/types/invariant.d.ts",
       "default": "./lib/invariant.js"
     },
+    "./cordis.patch.yml": "./cordis.patch.yml",
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
   "files": [
     "src",
-    "lib",
+    "lib/**/*.js",
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml",
     "LICENSE",
     "README.md"
   ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.mjs",
+    "check": "npm run build && npm test",
+    "prepare": "npm run build"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "license": "MIT",
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1",
-    "@deepseek-ai/dsh-session": ">=0.0.1-rc.1",
-    "@deepseek-ai/dsh-invariants": ">=0.0.1-rc.1",
-    "@deepseek-ai/cordis": ">=4.0.0"
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-session": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-invariants": "^0.1.1-rc.2",
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
   }
 }

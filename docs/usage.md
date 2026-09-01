@@ -1,112 +1,142 @@
-# Exemplo de uso do Gauntlet Loop no DSH
+# Using `gauntlet_loop`
 
-## Exemplo de cordis.yml (profile bundle)
+The lead agent orchestrates real builder/critic sub-agents and records the resulting protocol trace through `gauntlet_loop`. The tool rejects invalid transitions instead of merely documenting them.
 
-Adicione esta linha no `cordis.patch.yml` do seu profile DSH:
-
-```yaml
-- id: tool-gauntlet
-  name: gauntlet-loop-plugin
-```
-
-## Fluxo de uso com o tool `gauntlet_loop`
-
-O lead agent (o modelo) conduz o loop chamando o tool. Exemplo:
-
-### 1. Submit — comando cru
+## 1. Submit
 
 ```json
 {
   "action": "submit",
-  "command": "Crie uma landing page para minha marca de corrida, tema escuro e verde, que pareça viva."
+  "command": "Build a fast, polished checkout experience."
 }
 ```
 
-### 2. Refine — ant-subjetividade + barra
+The next phase is `refine`.
 
-O lead agent detecta `viva`/`alive` como termo subjetivo e propõe:
+## 2. Refine: objective command + real bar
+
+Subjective words such as `fast` and `polished` must either disappear or receive objective definitions with a measurement method.
 
 ```json
 {
   "action": "refine",
-  "refinedCommand": "Crie uma landing page para uma marca de corrida, tema escuro (#0a0a0a) com acentos verdes (#00ff88), que transmita energia e movimento.",
+  "refinedCommand": "Build checkout with p95 local interaction latency below 100 ms and no horizontal overflow from 360 px to 1440 px.",
   "bar": {
-    "name": "Nike Run Club landing page",
-    "fetchHow": "https://www.nike.com/run-club screenshot desktop e mobile",
-    "compareHow": "Screenshots lado a lado sem rótulos — o crítico vê ambos e escolhe qual transmite mais energia esportiva",
-    "description": "Landing page oficial da Nike Run Club, referência em design esportivo escuro com acentos vivos"
+    "name": "Stripe Checkout reference",
+    "fetchHow": "Open https://stripe.com/payments/checkout and capture the relevant desktop/mobile reference before critique.",
+    "compareHow": "Place the reference and our artifact side by side without labels and make a blind A/B choice before revealing identity.",
+    "description": "Named interaction and visual reference."
   },
-  "subjectiveResolved": [
-    {
-      "term": "viva",
-      "objectiveDefinition": "Uso de gradientes dinâmicos, imagens em movimento/parallax, tipografia ousada e contraste entre fundo escuro e elementos verdes neon",
-      "measuredBy": "Comparação cega por screenshots contra a barra (Nike Run Club)"
-    }
-  ]
+  "subjectiveResolved": []
 }
 ```
 
-### 3. Split — divisão em peças
+A bar fails the gate if its name is empty, `fetchHow` is vague, or `compareHow` does not explicitly describe a blind/label-free comparison.
+
+## 3. Split into judgeable units
 
 ```json
 {
   "action": "split",
   "pieces": [
-    { "id": "hero", "title": "Seção Hero", "description": "Título grande, subtítulo, CTA, imagem de fundo dinâmica" },
-    { "id": "features", "title": "Seção de Benefícios", "description": "Grid 3x2 com ícones e descrições" },
-    { "id": "testimonials", "title": "Depoimentos", "description": "Carrossel de depoimentos com fotos" },
-    { "id": "cta", "title": "Call-to-Action Final", "description": "Seção de inscrição com formulário" }
+    {
+      "id": "shell",
+      "title": "Checkout shell",
+      "description": "Layout, hierarchy and responsive behavior judged independently."
+    },
+    {
+      "id": "interaction",
+      "title": "Checkout interaction",
+      "description": "Input, validation and latency behavior judged independently."
+    }
   ]
 }
 ```
 
-### 4. Build + Critique (loop por peça)
+IDs must be unique. Each unit needs a title and description. The hard maximum is 32 units.
 
-Para cada peça, o lead agent spawna um builder sub-agent via `tool subagent`, depois chama `build`:
+## 4. Build with a fresh builder
+
+First run an actual builder sub-agent. Then register what it produced:
 
 ```json
 {
   "action": "build",
   "pieceIndex": 0,
-  "builderSubagentId": "sub-abc123",
+  "builderSubagentId": "builder-run-17",
+  "builderEvidence": "Unit tests pass; responsive smoke check completed.",
   "artifact": {
-    "location": "/path/to/hero.html",
-    "summary": "Hero section com gradiente escuro, texto branco, CTA verde neon, imagem de fundo com corredor em movimento"
+    "location": "/workspace/app/src/checkout.tsx",
+    "summary": "Responsive checkout shell implemented and available for direct inspection."
   }
 }
 ```
 
-Depois spawna um critic sub-agent com contexto fresco, que chama `critique`:
+The same agent id cannot be reused anywhere else in this Gauntlet run. A second build for this unit is rejected until its pending build is critiqued.
+
+## 5. Critique with a separate fresh critic
+
+Spawn a new critic with fresh context. Give it the artifact and bar, but do not disclose which candidate is ours until after it chooses.
 
 ```json
 {
   "action": "critique",
   "pieceIndex": 0,
-  "criticSubagentId": "sub-def456",
+  "criticSubagentId": "critic-run-31",
   "verdict": {
     "winner": "bar",
-    "notes": "A barra (Nike) tem um gradiente mais suave e tipografia mais ousada. O contraste do CTA é melhor na barra."
+    "notes": "The reference preserves clearer visual hierarchy at 360 px.",
+    "evidence": "Blind A/B screenshots: candidate B kept CTA and total visible while candidate A pushed the total below the first viewport.",
+    "blind": true
   }
 }
 ```
 
-Se `"bar"` → o lead agent ajusta e rebuilda. Se `"ours"` → avança para a próxima peça.
+Required conditions:
 
-### 5. Complete
+- there must be exactly one pending build for the unit;
+- the critic id must be new and different from the builder id;
+- `winner` is exactly `ours` or `bar`;
+- `notes` and observable `evidence` are non-empty;
+- `blind` must literally be `true`.
+
+If `bar` wins, the unit moves to `rebuild` and requires a **new builder id**. If `ours` wins, the unit moves to `won`.
+
+## 6. Inspect progress
+
+```json
+{ "action": "status" }
+```
+
+The result is rendered as the visual workbench with phase, bar, progress, rounds, unit status, latest evidence and the recommended next protocol action.
+
+## 7. Complete
+
+Only after every unit is `won`:
 
 ```json
 {
   "action": "complete",
   "summary": {
-    "outcome": "Landing page completa com 4 seções, todas venceram a comparação cega contra a Nike Run Club.",
-    "lessons": "O gradiente escuro-verde precisou de 3 iterações no hero para igualar a referência. A seção de depoimentos venceu de primeira."
+    "outcome": "All checkout units beat the named bar in blind evidence-backed comparisons.",
+    "lessons": "Mobile hierarchy was the recurring failure mode and required one rebuild."
   }
 }
 ```
 
-## Dicas importantes
+## Halt instead of faking convergence
 
-- **Barra vaga quebra o loop**: o crítico inventa uma comparação e aprova tudo. Sempre exija `name`, `fetchHow` e `compareHow` concretos
-- **Builder ≠ Critic**: o crítico precisa de contexto fresco e não pode saber o esforço do builder
-- **Sem rounds fixos**: o loop só termina quando o crítico escolhe `"ours"`. Se o lead agent definir um número máximo de tentativas, o gauntlet perde seu propósito
-- **Termos subjetivos**: `bonito`, `moderno`, `premium`, `user-friendly`, `rápido`, `intuitivo`, `eficiente`, `robusto`, `escalável`, `clean`, `fluido`, `polished`, `elegante` — todos esses precisam de definição objetiva
+If the bar becomes unavailable, requirements change materially, a budget boundary is reached, or continuing no longer makes sense:
+
+```json
+{
+  "action": "halt",
+  "reason": "Reference became unavailable; a valid blind comparison can no longer be performed."
+}
+```
+
+This records a terminal `halted` state. It is intentionally different from `done`.
+
+## Important limitation
+
+The plugin validates the trace supplied to it. It does not currently call the DSH sub-agent provider directly, so it cannot independently verify that a reported sub-agent id was really a fresh context. Do not claim the Gauntlet ran if the lead did not actually delegate the builder and critic work.

@@ -1,84 +1,119 @@
-# Gauntlet Loop Plugin para DSH
+# Gauntlet Loop Plugin for DSH
 
-Plugin oficial do **Gauntlet Loop** (técnica de [Matt Shumer](https://github.com/mshumer)) para o [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
+A strict, auditable implementation of the **Gauntlet Loop** for DeepSeek Harness (DSH), with an in-tool visual workbench.
 
-Um **lead agent** divide um projeto em partes pequenas e usa **sub-agents críticos separados** para testar o trabalho contra um benchmark de qualidade rigoroso, em loop contínuo.
+The plugin does not build the artifact itself. It makes the **lead agent** follow a verifiable protocol: define a real quality bar, split the work, use a fresh builder, use a separate fresh critic, compare blindly, record evidence, and rebuild whenever the bar wins.
 
-## Funcionalidades
+## Why v1.1 exists
 
-| Funcionalidade | Descrição |
-|---|---|
-| 🚫 **Anti-subjetividade** | A fase `refine` detecta ~60 termos subjetivos (`premium`, `bonito`, `moderno`, `user-friendly`, etc.) e **rejeita** o comando até que cada um receba definição objetiva + mensurável |
-| 🎯 **Barra de qualidade real** | Exige `name` (nome específico), `fetchHow` (como o crítico acessa a barra), `compareHow` (como a comparação cega é feita) — nunca uma rubric vaga |
-| 📦 **Divisão em peças** | O lead agent divide o trabalho em partes pequenas e independentes |
-| 👷 **Builder sub-agent separado** | Cada peça é construída por um sub-agent dedicado |
-| 🔍 **Critic sub-agent cego** | Crítico em contexto **fresco** que abre o artefato + a barra, compara **sem rótulos** (`blind`), e devolve veredito binário (`"ours"` ou `"bar"`) |
-| 🔄 **Loop até vencer** | Se o crítico escolher a barra → **rebuild obrigatório**. Nunca rounds fixos. O loop só termina quando o trabalho do builder vence a comparação cega |
-| 📝 **Rastreamento de sub-agents** | Cada round registra o `builderSubagentId` e `criticSubagentId` para auditoria |
+The original implementation tracked the intended ritual, but it was possible to register an empty builder/artifact, critique before a build, reuse critic context, or mark a piece as won without evidence. Its tool output was also raw JSON.
 
-## Como o fluxo funciona
+v1.1 turns that loose recorder into a stricter state machine:
 
-1. **`submit`** — você dá o comando cru
-2. **`refine`** — o lead agent propõe um comando refinado + uma barra real. Termos subjetivos são detectados e exigem resolução objetiva. Barra vaga é rejeitada
-3. **`split`** — o trabalho é dividido em peças pequenas
-4. **`build`** — para cada peça, o lead agent spawna um **builder sub-agent** (tool `subagent`) que produz o artefato
-5. **`critique`** — o lead agent spawna um **critic sub-agent** em contexto fresco, que abre o artefato e a barra, compara cegamente, e devolve `"ours"` (nosso é melhor) ou `"bar"` (a barra é melhor)
-6. Se `"bar"` → volta ao passo 4 (rebuild). Se `"ours"` → próxima peça
-7. **`complete`** — todas as peças venceram, resumo final
+- **build-before-critique is mandatory**;
+- every round requires a **new builder sub-agent id**;
+- every critique requires a **new critic sub-agent id**, different from the builder;
+- `artifact.location` and `artifact.summary` are mandatory;
+- verdicts require `notes`, observable `evidence`, and `blind: true`;
+- a `"bar"` verdict forces `rebuild`;
+- subjective wording is blocked until it is removed or made measurable;
+- the quality bar must be named, reproducibly fetchable, and explicitly compared blind/without labels;
+- all state transitions are validated by a pure core with automated tests.
 
-## Instalação no DSH
+## Visual workbench
 
-### Método 1: Instalação global (recomendado)
+Every result is rendered as a compact dashboard instead of a JSON dump. DSH Host surfaces also receive a native generic tool card; clients that do not implement that card still receive the same dashboard as text.
+
+```text
+┌─ GAUNTLET LOOP ─────────────────────────────────────────────
+│ OK  BUILD ⇄ BLIND CRITIC  ·  call-42
+│ █████████░░░░░░░░░  1/2 units won  ·  3 round(s)
+│ BAR  Stripe Checkout
+├─ UNITS
+│ ✓ shell  Checkout shell  ·  R2 OURS
+│    ↳ artifact src/checkout.ts · OURS · blind A/B selected ours…
+│ ◇ polish  Interaction polish  ·  R1 awaiting critic
+│    ↳ artifact src/ui.ts
+├─ NEXT  critique piece[1]
+└─────────────────────────────────────────────────────────────
+```
+
+Status glyphs: `○` pending, `◇` awaiting critic, `↻` rebuild required, `✓` won.
+
+## Protocol
+
+1. `submit` — record the raw goal.
+2. `refine` — make requirements objective and define the real comparison bar.
+3. `split` — create small, independently judgeable units.
+4. `build` — register work produced by a fresh builder sub-agent.
+5. `critique` — register a blind, evidence-backed verdict from a separate fresh critic.
+6. If the bar wins, rebuild that unit with a new builder. If ours wins, continue.
+7. When every unit wins, `complete` records the final outcome and lessons.
+8. `halt` is the explicit escape hatch when continuing is no longer appropriate; it records the reason instead of pretending convergence happened.
+
+`status` is safe at any phase and renders the current workbench. `reset` starts over.
+
+## Install as a DSH bundle
+
+This package ships its own `cordis.patch.yml` and `dsh.bundle` manifest. Add it to the DSH profile where you want the tool available:
 
 ```bash
-# Na raiz do seu checkout do DSH
-cd /caminho/para/deepseek-harness
-pnpm add ./caminho/para/gauntlet-loop-plugin
+dsh plugin --profile <profile> add github:pedro-labsabs/gauntlet-loop-plugin
 ```
 
-### Método 2: Como bundle no profile
+Or install a local checkout/package into the profile:
 
-Adicione no `cordis.patch.yml` do seu profile:
+```bash
+npm install
+npm run check
+npm pack
+dsh plugin --profile <profile> add ./gauntlet-loop-plugin-1.1.0.tgz
+```
+
+The bundle inserts:
 
 ```yaml
-- id: tool-gauntlet
-  name: '@deepseek-ai/dsh-tool-gauntlet'
+- insert:
+    - id: tool-gauntlet
+      name: gauntlet-loop-plugin
 ```
 
-E adicione `@deepseek-ai/dsh-tool-gauntlet` como dependência no `package.json` do seu profile.
+## Tool contract
 
-### Método 3: Como plugin dinâmico (sessão única)
+| Action | Required data | Gate |
+|---|---|---|
+| `submit` | `command` | non-empty goal |
+| `refine` | `refinedCommand`, `bar`, subjective resolutions when flagged | real/fetchable bar + blind comparison plan |
+| `split` | `pieces[]` | 1–32 unique, titled, described units |
+| `build` | `pieceIndex`, `builderSubagentId`, `artifact` | fresh builder + openable artifact |
+| `critique` | `pieceIndex`, `criticSubagentId`, `verdict` | fresh separate critic + evidence + `blind:true` |
+| `complete` | `summary.outcome` | only after every unit won |
+| `halt` | `reason` | only while active |
+| `status` | — | any phase |
+| `reset` | — | any phase |
 
-Use o tool `cordis_define` para criar um plugin temporário com o código-fonte deste pacote.
+See [docs/usage.md](docs/usage.md) for a complete call sequence.
 
-## Pré-requisitos
+## What the plugin proves — and what it does not
 
-- DeepSeek Harness (DSH) instalado e rodando
-- Pacotes `@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-session`, `@deepseek-ai/cordis`
+The state machine can prove that the **registered protocol trace** is internally valid: a critique cannot exist without a build, agent ids cannot be reused inside the run, the builder cannot also be the critic, and accepted verdicts carry blind/evidence assertions.
 
-## Parâmetros do tool `gauntlet_loop`
+It cannot independently prove that a supplied sub-agent id corresponds to a genuinely fresh DSH process/context, nor inspect arbitrary artifacts by itself. The lead/harness still owns the actual delegation and artifact access. The stricter contract makes skipped steps visible and rejectable instead of silently accepting them.
 
-| Parâmetro | Tipo | Obrigatório | Descrição |
-|---|---|---|---|
-| `action` | string | ✅ | `submit`, `refine`, `split`, `build`, `critique`, `complete`, `status`, `reset` |
-| `command` | string | no submit | Comando cru do usuário |
-| `refinedCommand` | string | no refine | Comando refinado |
-| `bar` | json | no refine | `{name, fetchHow, compareHow, description}` |
-| `subjectiveResolved` | json | no refine | `[{term, objectiveDefinition, measuredBy}]` |
-| `pieces` | json | no split | `[{id, title, description}]` |
-| `pieceIndex` | integer | no build/critique | Índice 0-based da peça |
-| `builderSubagentId` | string | no build | ID do sub-agent builder |
-| `artifact` | json | no build | `{location, summary}` |
-| `criticSubagentId` | string | no critique | ID do sub-agent critic |
-| `verdict` | json | no critique | `{winner: "ours"|"bar", notes}` |
-| `summary` | json | no complete | `{outcome, lessons}` |
+State is currently process-local. Restarting the DSH process loses an active Gauntlet run. Durable session projection/checkpointing is the next architectural step rather than being faked with an ad-hoc file.
 
-## Créditos
+## Architecture
 
-- **Técnica Gauntlet Loop**: [Matt Shumer](https://github.com/mshumer) — [Claude of Duty](https://github.com/mshumer/Claude-of-Duty)
-- **Skill original**: [RoboNuggets/gauntlet-loop](https://github.com/robonuggets/gauntlet-loop)
-- **Plugin DSH**: [RenyEnnos](https://github.com/RenyEnnos)
+- `src/core.ts` — pure protocol/state machine; no DSH dependency.
+- `src/presentation.ts` — deterministic dashboard renderer.
+- `src/index.ts` — thin DSH tool adapter + Host presentation card.
+- `src/invariant.ts` — package invariant companion; durable replay checks are intentionally deferred until state becomes durable.
+- `test/` — protocol and visual renderer regression tests.
 
-## Licença
+## Credits
+
+The Gauntlet Loop approach is associated with Matt Shumer. This project was also informed by community implementations such as RoboNuggets' gauntlet-loop skill.
+
+## License
 
 MIT

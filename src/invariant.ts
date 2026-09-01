@@ -1,31 +1,19 @@
-/**
- * Package-owned invariant companion for `@deepseek-ai/dsh-tool-gauntlet`.
- * @module @deepseek-ai/dsh-tool-gauntlet/invariant
- */
-
-/* jscpd:ignore-start */
+/** Package-owned invariant companion for gauntlet-loop-plugin. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 
-const PACKAGE_NAME = '@deepseek-ai/dsh-tool-gauntlet'
+const PACKAGE_NAME = 'gauntlet-loop-plugin'
 
-/** Cordis companion plugin name. */
 export const name = 'tool-gauntlet-invariant'
-/** Service required before the companion can reserve package ownership. */
 export const inject = ['invariants']
 
 /**
- * No runtime invariant: this model-facing tool owns no independent lifecycle
- * stream or durable event shape of its own; the per-session loop state is
- * process-local and fully owned by the tool's execute path.
+ * State-transition validation lives in the pure core and rejects invalid
+ * protocol actions synchronously. Cross-restart/session-replay validation is
+ * intentionally deferred until the loop state moves from process memory into
+ * a durable DSH projection.
  */
 const install: InvariantInstaller = () => {}
 
-/**
- * Register this package's invariant companion.
- * @param ctx - Cordis context carrying the invariant service.
- * @returns the installed registration's disposer after setup succeeds.
- */
 export const apply = (ctx: Context): Promise<() => void> =>
   Promise.resolve(ctx.invariants.register(PACKAGE_NAME, install))
-/* jscpd:ignore-end */
